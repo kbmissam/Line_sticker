@@ -4,129 +4,125 @@ from rembg import remove
 import io
 import zipfile
 import numpy as np
+import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v3.0", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v3.0 (綠幕終極版)")
-st.markdown("### 新增功能：針對「螢光綠」背景的專用切除模式，不再依賴 AI 猜測！")
+st.set_page_config(page_title="莎拉爸貼圖神器 v4.0", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v4.0 (智慧視覺切割版)")
+st.markdown("### 終極進化！不再依賴死板網格，使用 AI 視覺技術自動偵測並切割每一張貼圖，保證不切到肉！")
 
 # --- 側邊欄設定 ---
 st.sidebar.header("⚙️ 設定參數")
 uploaded_file = st.sidebar.file_uploader("請上傳您的貼圖大圖 (JPG/PNG)", type=["jpg", "jpeg", "png"])
-rows = st.sidebar.number_input("縱向 (Rows)", min_value=1, value=5)
-cols = st.sidebar.number_input("橫向 (Columns)", min_value=1, value=6)
+st.sidebar.info("💡 v4.0 版本會自動偵測貼圖數量，無需再手動設定行列數。")
 
-# --- ⭐ 新增模式切換 ⭐ ---
-st.sidebar.markdown("---")
-st.sidebar.header("🎨 去背模式選擇")
-remove_mode = st.sidebar.radio(
-    "請選擇去背方式：",
-    ("🟢 綠幕模式 (Chroma Key) - 推薦綠底圖用", "🤖 AI 模式 (Rembg) - 一般白底圖用")
-)
+# --- 智慧視覺切割演算法 ---
+def smart_slice_and_process(image_pil):
+    # 1. 將 PIL 圖片轉為 OpenCV 格式 (RGB -> BGR)
+    img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+    
+    # 2. 轉為灰階
+    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    
+    # 3. 二值化處理 (黑白分明)，找出物體
+    # 使用 Otsu's 方法自動尋找最佳閾值
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # 4. 尋找輪廓 (Contours)
+    # RETR_EXTERNAL 只找最外層的輪廓
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 5. 過濾太小的雜訊輪廓
+    min_area = 1000 # 可以根據實際情況調整
+    valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
+    
+    # 6. 根據位置排序 (從上到下，從左到右)
+    # 這樣切出來的順序才會是對的
+    bounding_boxes = [cv2.boundingRect(c) for c in valid_contours]
+    # 先按 y (列) 排序，再按 x (行) 排序，這裡做一個簡單的近似排序
+    bounding_boxes.sort(key=lambda x: (round(x[1]/100), x[0]))
 
-# --- 綠幕去背演算法 (不靠 AI，靠數學) ---
-def remove_green_screen_math(img_pil):
-    # 轉成陣列
-    img = np.array(img_pil.convert("RGBA"))
-    # 分離通道
-    r, g, b, a = img[:, :, 0], img[:, :, 1], img[:, :, 2], img[:, :, 3]
+    processed_stickers = []
     
-    # 定義「綠色」：綠色通道數值很高，且明顯大於紅藍通道
-    # 這裡的數值可以微調，但對螢光綠通常很準
-    # 條件：Green > 100 且 Green > Red + 20 且 Green > Blue + 20
-    mask = (g > 100) & (g > r + 30) & (g > b + 30)
-    
-    # 將符合條件(綠色)的像素，Alpha 設為 0 (透明)
-    img[mask, 3] = 0
-    
-    return Image.fromarray(img)
+    for i, (x, y, w, h) in enumerate(bounding_boxes):
+        # 7. 根據輪廓的邊界框切出小圖
+        # 為了保險，可以稍微外擴一點點邊界 (padding)
+        pad = 5
+        x_start, y_start = max(0, x-pad), max(0, y-pad)
+        x_end, y_end = min(img_cv.shape[1], x+w+pad), min(img_cv.shape[0], y+h+pad)
+        
+        sticker_cv = img_cv[y_start:y_end, x_start:x_end]
+        
+        # 轉回 PIL 格式
+        sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
+        
+        # 8. 對切好的小圖進行去背
+        sticker_no_bg = remove(sticker_pil)
+        
+        # 9. 修剪透明空白 (Trim)
+        bbox = sticker_no_bg.getbbox()
+        if bbox:
+            sticker_trimmed = sticker_no_bg.crop(bbox)
+            
+            # 10. 縮放至 LINE 規格
+            target_size = (370, 320)
+            sticker_final = sticker_trimmed.copy()
+            sticker_final.thumbnail(target_size, Image.Resampling.LANCZOS)
+            
+            processed_stickers.append(sticker_final)
+            
+    return processed_stickers
 
 # --- 主邏輯 ---
 if uploaded_file is not None:
-    image = Image.open(uploaded_file).convert("RGBA")
+    image = Image.open(uploaded_file).convert("RGB")
     st.image(image, caption="原始大圖預覽", use_container_width=True)
     
-    if st.button("🚀 開始魔法處理！"):
+    if st.button("🚀 開始智慧切割！"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # --- 步驟 1: 先去背 (根據選擇的模式) ---
-        status_text.text("⏳ 正在進行去背處理...")
-        progress_bar.progress(10)
+        status_text.text("⏳ 正在進行智慧視覺分析與切割 (這可能需要一點時間)...")
+        progress_bar.progress(20)
         
         try:
-            if "綠幕模式" in remove_mode:
-                # 使用物理數學法
-                image_no_bg = remove_green_screen_math(image)
-                st.success("✅ 已使用綠幕物理切除法")
-            else:
-                # 使用原本的 AI 法
-                image_no_bg = remove(image)
-                st.success("✅ 已使用 AI 智慧去背")
+            # 執行智慧切割主程序
+            stickers = smart_slice_and_process(image)
+            total_stickers = len(stickers)
+            st.success(f"✅ 成功偵測並切割出 {total_stickers} 張貼圖！")
+            progress_bar.progress(50)
+
+            # 準備 ZIP
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w") as zf:
+                st.write("---")
+                st.subheader("👀 最終成品預覽 (前 6 張)")
+                preview_cols = st.columns(6)
                 
-            st.image(image_no_bg, caption="去背後預覽 (檢查這裡！)", use_container_width=True)
-            
-        except Exception as e:
-            st.error(f"去背過程發生錯誤: {e}")
-            st.stop()
-
-        status_text.text("✅ 去背完成！開始切割...")
-        progress_bar.progress(30)
-
-        # 準備 ZIP
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zf:
-            width, height = image_no_bg.size
-            cell_width = width / cols
-            cell_height = height / rows
-            
-            total_stickers = rows * cols
-            count = 0
-            
-            st.write("---")
-            st.subheader("👀 最終成品預覽 (前 6 張)")
-            preview_cols = st.columns(6)
-            
-            for r in range(rows):
-                for c in range(cols):
-                    count += 1
-                    current_progress = 30 + (count / total_stickers * 70)
+                for i, sticker in enumerate(stickers):
+                    count = i + 1
+                    current_progress = 50 + (count / total_stickers * 50)
                     progress_bar.progress(int(current_progress))
                     
-                    # 裁切
-                    left = c * cell_width
-                    upper = r * cell_height
-                    right = left + cell_width
-                    lower = upper + cell_height
-                    sticker = image_no_bg.crop((left, upper, right, lower))
+                    # 存檔
+                    img_byte_arr = io.BytesIO()
+                    sticker.save(img_byte_arr, format='PNG')
+                    zf.writestr(f"{count:02d}.png", img_byte_arr.getvalue())
                     
-                    # 修剪透明空白 (Trim)
-                    bbox = sticker.getbbox()
-                    if bbox:
-                        sticker_trimmed = sticker.crop(bbox)
-                        
-                        # 縮放
-                        target_size = (370, 320)
-                        sticker_final = sticker_trimmed.copy()
-                        sticker_final.thumbnail(target_size, Image.Resampling.LANCZOS)
-                        
-                        # 存檔
-                        img_byte_arr = io.BytesIO()
-                        sticker_final.save(img_byte_arr, format='PNG')
-                        zf.writestr(f"{count:02d}.png", img_byte_arr.getvalue())
-                        
-                        if count <= 6:
-                            with preview_cols[count-1]:
-                                st.image(sticker_final, caption=f"{count:02d}.png")
-                    else:
-                        pass 
-
-        status_text.text("🎉 處理完成！")
-        progress_bar.progress(100)
-        
-        st.download_button(
-            label="📥 下載貼圖包 (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name="SarahDad_Stickers_Green.zip",
-            mime="application/zip"
-        )
+                    if count <= 6:
+                        with preview_cols[count-1]:
+                            st.image(sticker, caption=f"{count:02d}.png")
+                            
+            status_text.text("🎉 所有步驟完成！")
+            progress_bar.progress(100)
+            
+            st.download_button(
+                label="📥 下載貼圖包 (ZIP)",
+                data=zip_buffer.getvalue(),
+                file_name="SarahDad_Stickers_Smart.zip",
+                mime="application/zip"
+            )
+            
+        except Exception as e:
+            st.error(f"處理過程發生錯誤: {e}")
+            st.stop()
