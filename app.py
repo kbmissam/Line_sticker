@@ -137,4 +137,58 @@ if app_mode == "✂️ 貼圖自動切片":
 # 功能 B：製作主要與標籤圖片 (新功能)
 # ==========================================
 elif app_mode == "🖼️ 製作主要與標籤圖片":
-    st.markdown("### 步驟 2
+    st.markdown("### 步驟 2：上傳您最滿意的一張貼圖 (PNG)，自動製作成 LINE 上架專用格式。")
+    st.info("💡 請直接上傳剛剛切好並下載的單張 PNG 貼圖檔。")
+
+    col1, col2 = st.columns(2)
+
+    # --- 1. 主要圖片 (Main) ---
+    with col1:
+        st.subheader("1️⃣ 主要圖片 (Main)")
+        st.caption("顯示在商店列表的封面 (240x240)")
+        main_file = st.file_uploader("上傳 Main 圖片", type=["png", "jpg"], key="main")
+        
+        if main_file:
+            main_img = Image.open(main_file).convert("RGBA")
+            # 製作 240x240
+            main_resized = main_img.copy()
+            main_resized.thumbnail((240, 240), Image.Resampling.LANCZOS)
+            
+            # 建立一個 240x240 的透明畫布來置中 (避免比例跑掉)
+            final_main = Image.new("RGBA", (240, 240), (0, 0, 0, 0))
+            # 計算置中位置
+            offset_x = (240 - main_resized.width) // 2
+            offset_y = (240 - main_resized.height) // 2
+            final_main.paste(main_resized, (offset_x, offset_y))
+            
+            st.image(final_main, caption="預覽 (240x240)")
+            
+            # 下載按鈕
+            buf = io.BytesIO()
+            final_main.save(buf, format="PNG")
+            st.download_button("📥 下載 main.png", data=buf.getvalue(), file_name="main.png", mime="image/png")
+
+    # --- 2. 標籤圖片 (Tab) ---
+    with col2:
+        st.subheader("2️⃣ 標籤圖片 (Tab)")
+        st.caption("聊天室鍵盤的小圖示 (96x74)")
+        tab_file = st.file_uploader("上傳 Tab 圖片", type=["png", "jpg"], key="tab")
+        
+        if tab_file:
+            tab_img = Image.open(tab_file).convert("RGBA")
+            # 製作 96x74
+            tab_resized = tab_img.copy()
+            tab_resized.thumbnail((96, 74), Image.Resampling.LANCZOS)
+            
+            # 建立一個 96x74 的透明畫布來置中
+            final_tab = Image.new("RGBA", (96, 74), (0, 0, 0, 0))
+            offset_x = (96 - tab_resized.width) // 2
+            offset_y = (74 - tab_resized.height) // 2
+            final_tab.paste(tab_resized, (offset_x, offset_y))
+            
+            st.image(final_tab, caption="預覽 (96x74)")
+            
+            # 下載按鈕
+            buf2 = io.BytesIO()
+            final_tab.save(buf2, format="PNG")
+            st.download_button("📥 下載 tab.png", data=buf2.getvalue(), file_name="tab.png", mime="image/png")
