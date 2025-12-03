@@ -3,3 +3,4 @@ rembg
 onnxruntime
 Pillow
 numpy
+opencv-python-headless
