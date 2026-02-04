@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v7.1", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v7.1 (透明檢視優化版)")
-st.markdown("🚀 **v7.1 更新**：預覽區新增「棋盤格灰底」，讓您能看清白邊與透明度！(下載檔仍為透明)")
+st.set_page_config(page_title="莎拉爸貼圖神器 v7.2", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v7.2 (亮部守護版)")
+st.markdown("🚀 **v7.2 更新**：新增「亮部保護」功能，專門修復角色反光破洞問題！")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -40,19 +40,32 @@ uploaded_files = st.sidebar.file_uploader(
     key=f"uploader_{st.session_state.uploader_key}"
 )
 
-st.sidebar.header("2. 去背與效果")
+st.sidebar.header("2. 去背與修復")
 remove_mode = st.sidebar.radio(
     "選擇去背方式：",
-    ("🟢 綠幕模式 (可調靈敏度)", "🤖 AI 模式 (白底用)")
+    ("🟢 綠幕模式 (專家微調)", "🤖 AI 模式 (白底用)")
 )
 
-gs_sensitivity = 60
+# 預設參數
+gs_sensitivity = 50
+highlight_protection = 30 # 預設開啟保護
+border_thickness = 8
+
 if "綠幕" in remove_mode:
-    st.sidebar.markdown("##### 🔧 綠幕設定")
+    st.sidebar.markdown("##### 🔧 去背微調 (修復破洞)")
+    
+    # 1. 綠幕敏感度
     gs_sensitivity = st.sidebar.slider(
-        "綠幕敏感度 (Sensitivity)", 
-        min_value=10, max_value=100, value=60, 
-        help="數值越高越嚴格 (去更多綠色)；數值越低越寬容 (保留更多細節)。"
+        "🟢 綠幕敏感度 (Sensitivity)", 
+        min_value=0, max_value=100, value=50, 
+        help="【數值越小越安全】。如果角色破洞，請嘗試「調低」此數值。"
+    )
+    
+    # 2. [v7.2 新增] 亮部保護
+    highlight_protection = st.sidebar.slider(
+        "💡 亮部保護 (White Protection)", 
+        min_value=0, max_value=100, value=30, 
+        help="【專修頭頂破洞】數值越高，越強行保留白色的部分。如果反光處被切掉，請「調高」此數值。"
     )
 
 st.sidebar.markdown("##### ✨ 裝飾設定")
@@ -86,22 +99,53 @@ else:
 
 # --- 核心函數 ---
 
-# [v7.0 核心] HSV 去背
-def remove_green_screen_hsv(img_pil, sensitivity=60):
+# [v7.2 核心] HSV 去背 + 亮部保護
+def remove_green_screen_hsv(img_pil, sensitivity=50, white_protect=30):
     img = np.array(img_pil.convert("RGB"))
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     
-    # 動態調整範圍
-    tolerance = int(sensitivity * 0.8) 
-    lower_green = np.array([60 - 30, 40 + tolerance, 40 + tolerance])
-    upper_green = np.array([60 + 30, 255, 255])
+    # --- 1. 建立綠幕遮罩 (Green Mask) ---
+    # Sensitivity (0-100) -> Saturation Threshold (150 - 50)
+    # Sens=100 (Strict) -> Threshold=50 (Delete faint green)
+    # Sens=0 (Loose) -> Threshold=150 (Only delete super green)
     
-    mask = cv2.inRange(hsv, lower_green, upper_green)
-    mask_inv = cv2.bitwise_not(mask)
+    # 修正邏輯：敏感度越高，門檻越低 (越容易被當成背景)
+    sat_threshold = 140 - int(sensitivity * 0.9) # 50->95, 100->50, 0->140
     
+    # H: 綠色中心約 60。範圍寬度固定為 +/- 25
+    lower_green = np.array([35, sat_threshold, 40])
+    upper_green = np.array([85, 255, 255])
+    
+    green_mask = cv2.inRange(hsv, lower_green, upper_green)
+    
+    # --- 2. 建立亮部保護遮罩 (Highlight Mask) ---
+    # 保護邏輯：飽和度很低 (接近白/灰) 且 亮度很高 (很亮)
+    # White Protect (0-100) -> 調控對「白色」的寬容度
+    
+    if white_protect > 0:
+        # S上限：保護程度越高，允許越高的飽和度被視為白色 (max 60)
+        # V下限：保護程度越高，允許越暗的顏色被視為白色 (min 150)
+        protect_s_max = int(white_protect * 0.8) # 30 -> 24
+        protect_v_min = 255 - int(white_protect * 1.5) # 30 -> 210
+        
+        # 嚴格定義「白色/反光」
+        lower_white = np.array([0, 0, protect_v_min])     # 亮度要夠
+        upper_white = np.array([180, protect_s_max, 255]) # 飽和度要低
+        
+        white_mask = cv2.inRange(hsv, lower_white, upper_white)
+        
+        # --- 3. 運算：綠幕 - 保護區 ---
+        # 從綠幕遮罩中，挖掉屬於白色的部分
+        final_mask = cv2.bitwise_and(green_mask, cv2.bitwise_not(white_mask))
+    else:
+        final_mask = green_mask
+    
+    # --- 4. 應用遮罩 ---
+    mask_inv = cv2.bitwise_not(final_mask)
     img_rgba = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGBA)
     img_rgba[:, :, 3] = mask_inv
+    
     return Image.fromarray(img_rgba)
 
 def add_white_border(image_pil, thickness):
@@ -120,24 +164,21 @@ def add_white_border(image_pil, thickness):
     except Exception:
         return image_pil
 
-# [v7.1 新增] 建立棋盤格背景 (僅供預覽)
 def create_checkerboard_bg(size, check_size=20):
     w, h = size
-    img = Image.new("RGBA", (w, h), (220, 220, 220, 255)) # 淺灰底
+    img = Image.new("RGBA", (w, h), (220, 220, 220, 255))
     draw = ImageDraw.Draw(img)
-    # 畫深灰格子
     for x in range(0, w, check_size):
         for y in range(0, h, check_size):
             if (x // check_size + y // check_size) % 2 == 0:
                 draw.rectangle([x, y, x + check_size, y + check_size], fill=(255, 255, 255, 255))
     return img
 
-# [v7.1 修改] 為預覽圖加上背景
 def make_preview(img_pil):
     bg = create_checkerboard_bg(img_pil.size, check_size=20)
     return Image.alpha_composite(bg, img_pil.convert("RGBA"))
 
-def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val, man_r, man_c, border_thick, gs_sens):
+def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val, man_r, man_c, border_thick, gs_sens, white_prot):
     img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     processed_stickers = []
     
@@ -153,7 +194,8 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
 
     def post_process_sticker(sticker_pil_raw):
         if "綠幕" in mode_selection:
-            sticker_no_bg = remove_green_screen_hsv(sticker_pil_raw, gs_sens)
+            # [v7.2] 傳入兩個參數：敏感度 + 亮部保護
+            sticker_no_bg = remove_green_screen_hsv(sticker_pil_raw, gs_sens, white_prot)
         else:
             sticker_no_bg = remove(sticker_pil_raw)
         
@@ -220,9 +262,10 @@ if run_button:
                 image = Image.open(uploaded_file).convert("RGB")
                 st.session_state.original_images.append((uploaded_file.name, image))
                 
+                # [v7.2] 傳入 highlight_protection
                 stickers, strategy_used = process_single_image(
                     image, remove_mode, slice_mode, dilation_size, 
-                    manual_rows, manual_cols, border_thickness, gs_sensitivity
+                    manual_rows, manual_cols, border_thickness, gs_sensitivity, highlight_protection
                 )
                 
                 status_text.text(f"正在處理：{uploaded_file.name} ...")
@@ -230,7 +273,7 @@ if run_button:
                 progress_bar.progress((idx + 1) / len(uploaded_files))
             
             if not st.session_state.processed_stickers:
-                st.error("⚠️ 未偵測到貼圖。請檢查「綠幕敏感度」或切割網格設定。")
+                st.error("⚠️ 未偵測到貼圖。請調整去背參數。")
             else:
                 st.success(f"✅ 完成！共 {len(st.session_state.processed_stickers)} 張。")
                 
@@ -240,7 +283,7 @@ if run_button:
 # --- 預覽與下載區 ---
 if st.session_state.processed_stickers:
     st.divider()
-    st.header("🖼️ 貼圖總覽 (預覽已加灰底)")
+    st.header("🖼️ 貼圖總覽 (檢視是否有破洞)")
     
     try:
         total_stickers = len(st.session_state.processed_stickers)
@@ -251,62 +294,4 @@ if st.session_state.processed_stickers:
         with col_selectors:
             st.subheader("設定 Main/Tab")
             if sticker_options:
-                main_idx = int(st.selectbox("⭐ Main 圖片", sticker_options, index=0)) - 1
-                tab_idx = int(st.selectbox("🏷️ Tab 圖片", sticker_options, index=0)) - 1
-                
-                # 準備原始圖供下載
-                main_img_dl = st.session_state.processed_stickers[main_idx].copy()
-                main_img_dl.thumbnail((240, 240), Image.Resampling.LANCZOS)
-                tab_img_dl = st.session_state.processed_stickers[tab_idx].copy()
-                tab_img_dl.thumbnail((96, 74), Image.Resampling.LANCZOS)
-
-                # 準備預覽圖 (加棋盤格)
-                main_img_preview = make_preview(main_img_dl)
-                tab_img_preview = make_preview(tab_img_dl)
-                
-                c1, c2 = st.columns(2)
-                c1.image(main_img_preview, caption="Main (預覽)")
-                c2.image(tab_img_preview, caption="Tab (預覽)")
-            else:
-                st.warning("沒有可用的貼圖選項。")
-
-        with col_preview:
-            st.subheader("預覽牆 (檢查白邊)")
-            preview_cols = st.columns(6)
-            for i, sticker in enumerate(st.session_state.processed_stickers):
-                with preview_cols[i % 6]:
-                    # [v7.1 關鍵] 這裡顯示的是合成過背景的圖，方便檢查
-                    preview_img = make_preview(sticker)
-                    st.image(preview_img, caption=f"{i+1:02d}", use_container_width=True)
-        
-        st.divider()
-        # 下載按鈕邏輯 (下載的還是原始透明圖)
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w") as zf:
-            for name, img in st.session_state.original_images:
-                img_byte = io.BytesIO()
-                img.save(img_byte, format='PNG')
-                zf.writestr(f"Originals/{name.replace('.jpg','.png')}", img_byte.getvalue())
-            for i, sticker in enumerate(st.session_state.processed_stickers):
-                sticker_byte = io.BytesIO()
-                sticker.save(sticker_byte, format='PNG')
-                zf.writestr(f"Stickers/{i+1:02d}.png", sticker_byte.getvalue())
-            
-            if 'main_img_dl' in locals():
-                main_byte = io.BytesIO()
-                main_img_dl.save(main_byte, format='PNG')
-                zf.writestr("main.png", main_byte.getvalue())
-            if 'tab_img_dl' in locals():
-                tab_byte = io.BytesIO()
-                tab_img_dl.save(tab_byte, format='PNG')
-                zf.writestr("tab.png", tab_byte.getvalue())
-
-        st.download_button(
-            label=f"📦 下載 ZIP (v7.1)",
-            data=zip_buffer.getvalue(),
-            file_name="SarahDad_Stickers_v7.1.zip",
-            mime="application/zip",
-            type="primary"
-        )
-    except Exception as e:
-        st.error(f"顯示預覽時發生錯誤: {e}")
+                main_idx = int(st.selectbox("⭐ Main 圖片", sticker_options
