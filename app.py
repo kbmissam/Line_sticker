@@ -115,4 +115,198 @@ def add_white_border(image_pil, thickness):
         border_mask_cv = cv2.dilate(alpha_cv, kernel, iterations=1)
         white_border_bg = Image.new("RGBA", img.size, (255, 255, 255, 0))
         white_border_bg.paste((255, 255, 255, 255), (0, 0), Image.fromarray(border_mask_cv))
-        final_img = Image.alpha_composite(
+        final_img = Image.alpha_composite(white_border_bg, img)
+        return final_img
+    except Exception:
+        return image_pil
+
+# [v7.1 新增] 建立棋盤格背景 (僅供預覽)
+def create_checkerboard_bg(size, check_size=20):
+    w, h = size
+    img = Image.new("RGBA", (w, h), (220, 220, 220, 255)) # 淺灰底
+    draw = ImageDraw.Draw(img)
+    # 畫深灰格子
+    for x in range(0, w, check_size):
+        for y in range(0, h, check_size):
+            if (x // check_size + y // check_size) % 2 == 0:
+                draw.rectangle([x, y, x + check_size, y + check_size], fill=(255, 255, 255, 255))
+    return img
+
+# [v7.1 修改] 為預覽圖加上背景
+def make_preview(img_pil):
+    bg = create_checkerboard_bg(img_pil.size, check_size=20)
+    return Image.alpha_composite(bg, img_pil.convert("RGBA"))
+
+def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val, man_r, man_c, border_thick, gs_sens):
+    img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
+    processed_stickers = []
+    
+    use_grid = False
+    grid_rows, grid_cols = 5, 6
+    
+    if "智慧" in slicing_strategy: use_grid = False
+    elif "手動" in slicing_strategy: use_grid = True; grid_rows, grid_cols = man_r, man_c
+    elif "自動" in slicing_strategy:
+        use_grid = True; h, w, _ = img_cv.shape; ratio = w / h
+        if ratio > 1.4: grid_rows, grid_cols = 5, 8
+        else: grid_rows, grid_cols = 5, 6
+
+    def post_process_sticker(sticker_pil_raw):
+        if "綠幕" in mode_selection:
+            sticker_no_bg = remove_green_screen_hsv(sticker_pil_raw, gs_sens)
+        else:
+            sticker_no_bg = remove(sticker_pil_raw)
+        
+        bbox = sticker_no_bg.getbbox()
+        if bbox:
+            sticker_trimmed = sticker_no_bg.crop(bbox)
+            sticker_with_border = add_white_border(sticker_trimmed, border_thick)
+            
+            sticker_final = sticker_with_border.copy()
+            sticker_final.thumbnail((370, 320), Image.Resampling.LANCZOS)
+            w_new, h_new = sticker_final.size
+            if w_new % 2 != 0: w_new -= 1
+            if h_new % 2 != 0: h_new -= 1
+            if w_new == 0 or h_new == 0: return None
+            
+            if w_new != sticker_final.width or h_new != sticker_final.height:
+                 sticker_final = sticker_final.resize((w_new, h_new), Image.Resampling.LANCZOS)
+            return sticker_final
+        return None
+
+    if not use_grid:
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+        if "綠幕" in mode_selection: _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        else: _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+        kernel = np.ones((dilation_val, dilation_val), np.uint8)
+        thresh = cv2.dilate(thresh, kernel, iterations=2)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        min_area = 1000 
+        valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
+        bounding_boxes = [cv2.boundingRect(c) for c in valid_contours]
+        bounding_boxes.sort(key=lambda x: (round(x[1]/100), x[0]))
+        for x, y, w, h in bounding_boxes:
+            sticker_cv = img_cv[y:y+h, x:x+w]
+            sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
+            final = post_process_sticker(sticker_pil)
+            if final: processed_stickers.append(final)
+    else:
+        height, width, _ = img_cv.shape
+        cell_h = height // grid_rows
+        cell_w = width // grid_cols
+        for r in range(grid_rows):
+            for c in range(grid_cols):
+                x = c * cell_w
+                y = r * cell_h
+                sticker_cv = img_cv[y:y+cell_h, x:x+cell_w]
+                sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
+                final = post_process_sticker(sticker_pil)
+                if final: processed_stickers.append(final)
+
+    return processed_stickers, (grid_rows, grid_cols) if use_grid else ("Smart", "Smart")
+
+# --- 主程式區 ---
+if run_button:
+    if not uploaded_files:
+        st.error("⚠️ 請先上傳圖片再按開始！")
+    else:
+        st.session_state.processed_stickers = []
+        st.session_state.original_images = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            for idx, uploaded_file in enumerate(uploaded_files):
+                image = Image.open(uploaded_file).convert("RGB")
+                st.session_state.original_images.append((uploaded_file.name, image))
+                
+                stickers, strategy_used = process_single_image(
+                    image, remove_mode, slice_mode, dilation_size, 
+                    manual_rows, manual_cols, border_thickness, gs_sensitivity
+                )
+                
+                status_text.text(f"正在處理：{uploaded_file.name} ...")
+                st.session_state.processed_stickers.extend(stickers)
+                progress_bar.progress((idx + 1) / len(uploaded_files))
+            
+            if not st.session_state.processed_stickers:
+                st.error("⚠️ 未偵測到貼圖。請檢查「綠幕敏感度」或切割網格設定。")
+            else:
+                st.success(f"✅ 完成！共 {len(st.session_state.processed_stickers)} 張。")
+                
+        except Exception as e:
+            st.error(f"處理過程發生錯誤: {e}")
+
+# --- 預覽與下載區 ---
+if st.session_state.processed_stickers:
+    st.divider()
+    st.header("🖼️ 貼圖總覽 (預覽已加灰底)")
+    
+    try:
+        total_stickers = len(st.session_state.processed_stickers)
+        sticker_options = [f"{i+1:02d}" for i in range(total_stickers)]
+        
+        col_selectors, col_preview = st.columns([1, 2])
+        
+        with col_selectors:
+            st.subheader("設定 Main/Tab")
+            if sticker_options:
+                main_idx = int(st.selectbox("⭐ Main 圖片", sticker_options, index=0)) - 1
+                tab_idx = int(st.selectbox("🏷️ Tab 圖片", sticker_options, index=0)) - 1
+                
+                # 準備原始圖供下載
+                main_img_dl = st.session_state.processed_stickers[main_idx].copy()
+                main_img_dl.thumbnail((240, 240), Image.Resampling.LANCZOS)
+                tab_img_dl = st.session_state.processed_stickers[tab_idx].copy()
+                tab_img_dl.thumbnail((96, 74), Image.Resampling.LANCZOS)
+
+                # 準備預覽圖 (加棋盤格)
+                main_img_preview = make_preview(main_img_dl)
+                tab_img_preview = make_preview(tab_img_dl)
+                
+                c1, c2 = st.columns(2)
+                c1.image(main_img_preview, caption="Main (預覽)")
+                c2.image(tab_img_preview, caption="Tab (預覽)")
+            else:
+                st.warning("沒有可用的貼圖選項。")
+
+        with col_preview:
+            st.subheader("預覽牆 (檢查白邊)")
+            preview_cols = st.columns(6)
+            for i, sticker in enumerate(st.session_state.processed_stickers):
+                with preview_cols[i % 6]:
+                    # [v7.1 關鍵] 這裡顯示的是合成過背景的圖，方便檢查
+                    preview_img = make_preview(sticker)
+                    st.image(preview_img, caption=f"{i+1:02d}", use_container_width=True)
+        
+        st.divider()
+        # 下載按鈕邏輯 (下載的還是原始透明圖)
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            for name, img in st.session_state.original_images:
+                img_byte = io.BytesIO()
+                img.save(img_byte, format='PNG')
+                zf.writestr(f"Originals/{name.replace('.jpg','.png')}", img_byte.getvalue())
+            for i, sticker in enumerate(st.session_state.processed_stickers):
+                sticker_byte = io.BytesIO()
+                sticker.save(sticker_byte, format='PNG')
+                zf.writestr(f"Stickers/{i+1:02d}.png", sticker_byte.getvalue())
+            
+            if 'main_img_dl' in locals():
+                main_byte = io.BytesIO()
+                main_img_dl.save(main_byte, format='PNG')
+                zf.writestr("main.png", main_byte.getvalue())
+            if 'tab_img_dl' in locals():
+                tab_byte = io.BytesIO()
+                tab_img_dl.save(tab_byte, format='PNG')
+                zf.writestr("tab.png", tab_byte.getvalue())
+
+        st.download_button(
+            label=f"📦 下載 ZIP (v7.1)",
+            data=zip_buffer.getvalue(),
+            file_name="SarahDad_Stickers_v7.1.zip",
+            mime="application/zip",
+            type="primary"
+        )
+    except Exception as e:
+        st.error(f"顯示預覽時發生錯誤: {e}")
