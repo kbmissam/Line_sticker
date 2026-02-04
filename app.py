@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image
 from rembg import remove
 import io
 import zipfile
@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v6.9", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v6.9 (自動白邊版)")
-st.markdown("🚀 **v6.9 更新**：新增「自動白邊 (Die-cut Border)」功能，讓貼圖更像貼紙！")
+st.set_page_config(page_title="莎拉爸貼圖神器 v6.9.1", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v6.9.1 (去背修復版)")
+st.markdown("🚀 **v6.9.1 緊急修正**：放寬綠幕判定標準，解決去背失敗的問題！")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -39,12 +39,11 @@ uploaded_files = st.sidebar.file_uploader(
     key=f"uploader_{st.session_state.uploader_key}"
 )
 
-st.sidebar.header("2. 去背與效果") # [v6.9 修改標題]
+st.sidebar.header("2. 去背與效果")
 remove_mode = st.sidebar.radio(
     "選擇去背方式：",
     ("🟢 綠幕模式 (推薦！)", "🤖 AI 模式 (白底用)")
 )
-# [v6.9 新增] 白邊厚度滑桿
 border_thickness = st.sidebar.slider("⚪ 白邊厚度 (0=無邊)", 0, 20, 8)
 
 st.sidebar.header("3. 切割策略")
@@ -74,37 +73,34 @@ else:
         manual_cols = st.number_input("橫向行數 (Cols)", 1, 10, 4) 
 
 # --- 核心函數 ---
-# [v6.8 嚴格版去背]
+
+# [v6.9.1 修正] 放寬版綠幕去背算法
 def remove_green_screen_math(img_pil):
     img = np.array(img_pil.convert("RGBA"))
     r, g, b, a = img[:, :, 0], img[:, :, 1], img[:, :, 2], img[:, :, 3]
-    # 嚴格定義螢光綠：綠很亮，紅藍很暗
-    mask = (g > 210) & (r < 40) & (b < 40)
+    
+    # --- 新的判斷邏輯 ---
+    # 1. 綠色通道要夠亮 (>180)
+    # 2. 綠色要比紅色高出至少 30
+    # 3. 綠色要比藍色高出至少 30
+    # 這個組合比舊版寬容，但比最早的版本嚴格，能有效平衡。
+    mask = (g > 180) & (g > r + 30) & (g > b + 30)
+    # --------------------
+    
     img[mask, 3] = 0
     return Image.fromarray(img)
 
-# [v6.9 新增] 自動加白邊函數
 def add_white_border(image_pil, thickness):
     """為透明背景的圖片加上白色描邊"""
     if thickness == 0: return image_pil
-    
     img = image_pil.convert("RGBA")
-    # 取得 Alpha 通道作為遮罩
     alpha = img.getchannel('A')
     alpha_cv = np.array(alpha)
-    
-    # 使用形態學膨脹 (Dilation) 來製造邊框區域
     kernel_size = thickness * 2 + 1
     kernel = np.ones((kernel_size, kernel_size), np.uint8)
-    # 膨脹操作，讓不透明區域變胖
     border_mask_cv = cv2.dilate(alpha_cv, kernel, iterations=1)
-    
-    # 建立一個純白色的基底圖層，形狀就是剛剛膨脹後的樣子
     white_border_bg = Image.new("RGBA", img.size, (255, 255, 255, 0))
-    # 將白色填入遮罩區域
     white_border_bg.paste((255, 255, 255, 255), (0, 0), Image.fromarray(border_mask_cv))
-    
-    # 將原圖疊加在白色基底上 (原圖在上，白邊在下)
     final_img = Image.alpha_composite(white_border_bg, img)
     return final_img
 
@@ -115,15 +111,10 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
     use_grid = False
     grid_rows, grid_cols = 5, 6
     
-    if "智慧" in slicing_strategy:
-        use_grid = False
-    elif "手動" in slicing_strategy:
-        use_grid = True
-        grid_rows, grid_cols = man_r, man_c
+    if "智慧" in slicing_strategy: use_grid = False
+    elif "手動" in slicing_strategy: use_grid = True; grid_rows, grid_cols = man_r, man_c
     elif "自動" in slicing_strategy:
-        use_grid = True
-        h, w, _ = img_cv.shape
-        ratio = w / h
+        use_grid = True; h, w, _ = img_cv.shape; ratio = w / h
         if ratio > 1.4: grid_rows, grid_cols = 5, 8
         else: grid_rows, grid_cols = 5, 6
 
@@ -140,25 +131,23 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
         if bbox:
             sticker_trimmed = sticker_no_bg.crop(bbox)
             
-            # 3. [v6.9 關鍵新增] 加上白邊!
+            # 3. 加上白邊
             sticker_with_border = add_white_border(sticker_trimmed, border_thick)
             
-            # 4. 縮放至 LINE 規格
+            # 4. 縮放與正規化
             sticker_final = sticker_with_border.copy()
             sticker_final.thumbnail((370, 320), Image.Resampling.LANCZOS)
             w_new, h_new = sticker_final.size
-            # 確保偶數尺寸
             if w_new % 2 != 0: w_new -= 1
             if h_new % 2 != 0: h_new -= 1
             if w_new != sticker_final.width or h_new != sticker_final.height:
                  sticker_final = sticker_final.resize((w_new, h_new), Image.Resampling.LANCZOS)
-                 
             return sticker_final
         return None
 
     # --- 執行切割 ---
     if not use_grid:
-        # 智慧切割邏輯... (略，與前版相同，省略以節省篇幅)
+        # (智慧切割邏輯省略，與前版相同)
         gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
         if "綠幕" in mode_selection: _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         else: _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -172,7 +161,6 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
         for x, y, w, h in bounding_boxes:
             sticker_cv = img_cv[y:y+h, x:x+w]
             sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
-            # 呼叫後製流程
             final = post_process_sticker(sticker_pil)
             if final: processed_stickers.append(final)
     else:
@@ -186,7 +174,6 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
                 y = r * cell_h
                 sticker_cv = img_cv[y:y+cell_h, x:x+cell_w]
                 sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
-                # 呼叫後製流程
                 final = post_process_sticker(sticker_pil)
                 if final: processed_stickers.append(final)
 
@@ -214,7 +201,6 @@ if run_button:
             for idx, uploaded_file in enumerate(uploaded_files):
                 image = Image.open(uploaded_file).convert("RGB")
                 st.session_state.original_images.append((uploaded_file.name, image))
-                # [v6.9] 傳入 border_thickness 參數
                 stickers, strategy_used = process_single_image(
                     image, remove_mode, slice_mode, dilation_size, manual_rows, manual_cols, border_thickness
                 )
@@ -230,44 +216,3 @@ if st.session_state.processed_stickers:
     st.divider()
     st.header("🖼️ 貼圖總覽")
     total_stickers = len(st.session_state.processed_stickers)
-    sticker_options = [f"{i+1:02d}" for i in range(total_stickers)]
-    col_selectors, col_preview = st.columns([1, 2])
-    with col_selectors:
-        st.subheader("設定 Main/Tab")
-        main_idx = int(st.selectbox("⭐ Main 圖片", sticker_options, index=0)) - 1
-        tab_idx = int(st.selectbox("🏷️ Tab 圖片", sticker_options, index=0)) - 1
-        main_img = create_resized_image(st.session_state.processed_stickers[main_idx], (240, 240))
-        tab_img = create_resized_image(st.session_state.processed_stickers[tab_idx], (96, 74))
-        c1, c2 = st.columns(2)
-        c1.image(main_img, caption="Main")
-        c2.image(tab_img, caption="Tab")
-    with col_preview:
-        st.subheader("預覽牆")
-        preview_cols = st.columns(6)
-        for i, sticker in enumerate(st.session_state.processed_stickers):
-            with preview_cols[i % 6]:
-                st.image(sticker, caption=f"{i+1:02d}", use_container_width=True)
-    st.divider()
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zf:
-        for name, img in st.session_state.original_images:
-            img_byte = io.BytesIO()
-            img.save(img_byte, format='PNG')
-            zf.writestr(f"Originals/{name.replace('.jpg','.png')}", img_byte.getvalue())
-        for i, sticker in enumerate(st.session_state.processed_stickers):
-            sticker_byte = io.BytesIO()
-            sticker.save(sticker_byte, format='PNG')
-            zf.writestr(f"Stickers/{i+1:02d}.png", sticker_byte.getvalue())
-        main_byte = io.BytesIO()
-        main_img.save(main_byte, format='PNG')
-        zf.writestr("main.png", main_byte.getvalue())
-        tab_byte = io.BytesIO()
-        tab_img.save(tab_byte, format='PNG')
-        zf.writestr("tab.png", tab_byte.getvalue())
-    st.download_button(
-        label=f"📦 下載 ZIP (v6.9)",
-        data=zip_buffer.getvalue(),
-        file_name="SarahDad_Stickers_v6.9.zip",
-        mime="application/zip",
-        type="primary"
-    )
