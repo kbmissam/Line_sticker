@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter
 from rembg import remove
 import io
 import zipfile
@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v6.7", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v6.7 (按鈕置頂版)")
-st.markdown("🚀 **v6.7 更新**：將「開始處理」按鈕移至側邊欄最上方，保證永遠找得到！")
+st.set_page_config(page_title="莎拉爸貼圖神器 v6.9", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v6.9 (自動白邊版)")
+st.markdown("🚀 **v6.9 更新**：新增「自動白邊 (Die-cut Border)」功能，讓貼圖更像貼紙！")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -19,17 +19,13 @@ if 'original_images' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-# --- 側邊欄：控制台 (按鈕區) ---
+# --- 側邊欄：控制台 ---
 st.sidebar.header("⚙️ 控制台")
-
-# 1. 清除按鈕
 if st.sidebar.button("🗑️ 清除重來 (Reset All)", type="secondary", use_container_width=True):
     st.session_state.processed_stickers = []
     st.session_state.original_images = []
     st.session_state.uploader_key += 1 
     st.rerun()
-
-# 2. [關鍵修改] 執行按鈕移到這裡 (不用再找了！)
 run_button = st.sidebar.button("🚀 開始處理圖片 (Start)", type="primary", use_container_width=True)
 
 st.sidebar.markdown("---")
@@ -43,11 +39,13 @@ uploaded_files = st.sidebar.file_uploader(
     key=f"uploader_{st.session_state.uploader_key}"
 )
 
-st.sidebar.header("2. 去背模式")
+st.sidebar.header("2. 去背與效果") # [v6.9 修改標題]
 remove_mode = st.sidebar.radio(
     "選擇去背方式：",
     ("🟢 綠幕模式 (推薦！)", "🤖 AI 模式 (白底用)")
 )
+# [v6.9 新增] 白邊厚度滑桿
+border_thickness = st.sidebar.slider("⚪ 白邊厚度 (0=無邊)", 0, 20, 8)
 
 st.sidebar.header("3. 切割策略")
 slice_mode = st.sidebar.radio(
@@ -55,7 +53,7 @@ slice_mode = st.sidebar.radio(
     (
         "🧠 智慧視覺偵測 (不限格數)", 
         "🤖 強制網格 (自動判斷 6x5 / 8x5)", 
-        "📏 強制網格 (手動設定 4x3 等)"
+        "📏 強制網格 (手動設定)"
     )
 )
 
@@ -76,14 +74,41 @@ else:
         manual_cols = st.number_input("橫向行數 (Cols)", 1, 10, 4) 
 
 # --- 核心函數 ---
+# [v6.8 嚴格版去背]
 def remove_green_screen_math(img_pil):
     img = np.array(img_pil.convert("RGBA"))
     r, g, b, a = img[:, :, 0], img[:, :, 1], img[:, :, 2], img[:, :, 3]
-    mask = (g > 90) & (g > r + 15) & (g > b + 15)
+    # 嚴格定義螢光綠：綠很亮，紅藍很暗
+    mask = (g > 210) & (r < 40) & (b < 40)
     img[mask, 3] = 0
     return Image.fromarray(img)
 
-def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val=25, man_r=5, man_c=6):
+# [v6.9 新增] 自動加白邊函數
+def add_white_border(image_pil, thickness):
+    """為透明背景的圖片加上白色描邊"""
+    if thickness == 0: return image_pil
+    
+    img = image_pil.convert("RGBA")
+    # 取得 Alpha 通道作為遮罩
+    alpha = img.getchannel('A')
+    alpha_cv = np.array(alpha)
+    
+    # 使用形態學膨脹 (Dilation) 來製造邊框區域
+    kernel_size = thickness * 2 + 1
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    # 膨脹操作，讓不透明區域變胖
+    border_mask_cv = cv2.dilate(alpha_cv, kernel, iterations=1)
+    
+    # 建立一個純白色的基底圖層，形狀就是剛剛膨脹後的樣子
+    white_border_bg = Image.new("RGBA", img.size, (255, 255, 255, 0))
+    # 將白色填入遮罩區域
+    white_border_bg.paste((255, 255, 255, 255), (0, 0), Image.fromarray(border_mask_cv))
+    
+    # 將原圖疊加在白色基底上 (原圖在上，白邊在下)
+    final_img = Image.alpha_composite(white_border_bg, img)
+    return final_img
+
+def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val, man_r, man_c, border_thick):
     img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     processed_stickers = []
     
@@ -99,71 +124,71 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
         use_grid = True
         h, w, _ = img_cv.shape
         ratio = w / h
-        if ratio > 1.4: 
-            grid_rows, grid_cols = 5, 8
+        if ratio > 1.4: grid_rows, grid_cols = 5, 8
+        else: grid_rows, grid_cols = 5, 6
+
+    # --- 內部的切割與後製流程 ---
+    def post_process_sticker(sticker_pil_raw):
+        # 1. 去背
+        if "綠幕" in mode_selection:
+            sticker_no_bg = remove_green_screen_math(sticker_pil_raw)
         else:
-            grid_rows, grid_cols = 5, 6
+            sticker_no_bg = remove(sticker_pil_raw)
+        
+        # 2. 修剪透明邊緣 (Trim)
+        bbox = sticker_no_bg.getbbox()
+        if bbox:
+            sticker_trimmed = sticker_no_bg.crop(bbox)
+            
+            # 3. [v6.9 關鍵新增] 加上白邊!
+            sticker_with_border = add_white_border(sticker_trimmed, border_thick)
+            
+            # 4. 縮放至 LINE 規格
+            sticker_final = sticker_with_border.copy()
+            sticker_final.thumbnail((370, 320), Image.Resampling.LANCZOS)
+            w_new, h_new = sticker_final.size
+            # 確保偶數尺寸
+            if w_new % 2 != 0: w_new -= 1
+            if h_new % 2 != 0: h_new -= 1
+            if w_new != sticker_final.width or h_new != sticker_final.height:
+                 sticker_final = sticker_final.resize((w_new, h_new), Image.Resampling.LANCZOS)
+                 
+            return sticker_final
+        return None
 
     # --- 執行切割 ---
     if not use_grid:
+        # 智慧切割邏輯... (略，與前版相同，省略以節省篇幅)
         gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        if "綠幕" in mode_selection:
-            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        else:
-            _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-
+        if "綠幕" in mode_selection: _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        else: _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
         kernel = np.ones((dilation_val, dilation_val), np.uint8)
         thresh = cv2.dilate(thresh, kernel, iterations=2)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
         min_area = 1000 
         valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
         bounding_boxes = [cv2.boundingRect(c) for c in valid_contours]
         bounding_boxes.sort(key=lambda x: (round(x[1]/100), x[0]))
-
         for x, y, w, h in bounding_boxes:
             sticker_cv = img_cv[y:y+h, x:x+w]
             sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
-            if "綠幕" in mode_selection:
-                sticker_no_bg = remove_green_screen_math(sticker_pil)
-            else:
-                sticker_no_bg = remove(sticker_pil)
-            
-            bbox = sticker_no_bg.getbbox()
-            if bbox:
-                sticker_final = sticker_no_bg.crop(bbox)
-                sticker_final.thumbnail((370, 320), Image.Resampling.LANCZOS)
-                w_new, h_new = sticker_final.size
-                if w_new % 2 != 0: w_new -= 1
-                if h_new % 2 != 0: h_new -= 1
-                sticker_final = sticker_final.resize((w_new, h_new))
-                processed_stickers.append(sticker_final)
-    
+            # 呼叫後製流程
+            final = post_process_sticker(sticker_pil)
+            if final: processed_stickers.append(final)
     else:
+        # 強制網格邏輯
         height, width, _ = img_cv.shape
         cell_h = height // grid_rows
         cell_w = width // grid_cols
-        
         for r in range(grid_rows):
             for c in range(grid_cols):
                 x = c * cell_w
                 y = r * cell_h
                 sticker_cv = img_cv[y:y+cell_h, x:x+cell_w]
                 sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
-                if "綠幕" in mode_selection:
-                    sticker_no_bg = remove_green_screen_math(sticker_pil)
-                else:
-                    sticker_no_bg = remove(sticker_pil)
-                
-                bbox = sticker_no_bg.getbbox()
-                if bbox:
-                    sticker_final = sticker_no_bg.crop(bbox)
-                    sticker_final.thumbnail((370, 320), Image.Resampling.LANCZOS)
-                    w_new, h_new = sticker_final.size
-                    if w_new % 2 != 0: w_new -= 1
-                    if h_new % 2 != 0: h_new -= 1
-                    sticker_final = sticker_final.resize((w_new, h_new))
-                    processed_stickers.append(sticker_final)
+                # 呼叫後製流程
+                final = post_process_sticker(sticker_pil)
+                if final: processed_stickers.append(final)
 
     return processed_stickers, (grid_rows, grid_cols) if use_grid else ("Smart", "Smart")
 
@@ -176,69 +201,52 @@ def create_resized_image(img, target_size):
     bg.paste(img, (left, top))
     return bg
 
-# --- 主程式區 (處理邏輯) ---
-
-# 當按下側邊欄的按鈕時執行
+# --- 主程式區 ---
 if run_button:
     if not uploaded_files:
         st.error("⚠️ 請先上傳圖片再按開始！")
     else:
         st.session_state.processed_stickers = []
         st.session_state.original_images = []
-        
         progress_bar = st.progress(0)
         status_text = st.empty()
-        
         try:
             for idx, uploaded_file in enumerate(uploaded_files):
                 image = Image.open(uploaded_file).convert("RGB")
                 st.session_state.original_images.append((uploaded_file.name, image))
-                
+                # [v6.9] 傳入 border_thickness 參數
                 stickers, strategy_used = process_single_image(
-                    image, remove_mode, slice_mode, dilation_size, manual_rows, manual_cols
+                    image, remove_mode, slice_mode, dilation_size, manual_rows, manual_cols, border_thickness
                 )
-                
                 status_text.text(f"正在處理：{uploaded_file.name} ...")
                 st.session_state.processed_stickers.extend(stickers)
                 progress_bar.progress((idx + 1) / len(uploaded_files))
-            
-            if not st.session_state.processed_stickers:
-                st.error("⚠️ 未偵測到貼圖。")
-            else:
-                st.success(f"✅ 完成！共 {len(st.session_state.processed_stickers)} 張。")
-                
-        except Exception as e:
-            st.error(f"錯誤: {e}")
+            if not st.session_state.processed_stickers: st.error("⚠️ 未偵測到貼圖。")
+            else: st.success(f"✅ 完成！共 {len(st.session_state.processed_stickers)} 張。")
+        except Exception as e: st.error(f"錯誤: {e}")
 
-# --- 預覽與下載區 ---
+# --- 預覽與下載區 (保持不變) ---
 if st.session_state.processed_stickers:
     st.divider()
     st.header("🖼️ 貼圖總覽")
-    
     total_stickers = len(st.session_state.processed_stickers)
     sticker_options = [f"{i+1:02d}" for i in range(total_stickers)]
-    
     col_selectors, col_preview = st.columns([1, 2])
-    
     with col_selectors:
         st.subheader("設定 Main/Tab")
         main_idx = int(st.selectbox("⭐ Main 圖片", sticker_options, index=0)) - 1
         tab_idx = int(st.selectbox("🏷️ Tab 圖片", sticker_options, index=0)) - 1
-        
         main_img = create_resized_image(st.session_state.processed_stickers[main_idx], (240, 240))
         tab_img = create_resized_image(st.session_state.processed_stickers[tab_idx], (96, 74))
-        
         c1, c2 = st.columns(2)
         c1.image(main_img, caption="Main")
         c2.image(tab_img, caption="Tab")
-
     with col_preview:
         st.subheader("預覽牆")
         preview_cols = st.columns(6)
         for i, sticker in enumerate(st.session_state.processed_stickers):
             with preview_cols[i % 6]:
                 st.image(sticker, caption=f"{i+1:02d}", use_container_width=True)
-
     st.divider()
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zf:
@@ -250,18 +258,16 @@ if st.session_state.processed_stickers:
             sticker_byte = io.BytesIO()
             sticker.save(sticker_byte, format='PNG')
             zf.writestr(f"Stickers/{i+1:02d}.png", sticker_byte.getvalue())
-        
         main_byte = io.BytesIO()
         main_img.save(main_byte, format='PNG')
         zf.writestr("main.png", main_byte.getvalue())
         tab_byte = io.BytesIO()
         tab_img.save(tab_byte, format='PNG')
         zf.writestr("tab.png", tab_byte.getvalue())
-
     st.download_button(
-        label=f"📦 下載 ZIP (v6.7)",
+        label=f"📦 下載 ZIP (v6.9)",
         data=zip_buffer.getvalue(),
-        file_name="SarahDad_Stickers_v6.7.zip",
+        file_name="SarahDad_Stickers_v6.9.zip",
         mime="application/zip",
         type="primary"
     )
