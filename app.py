@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v7.4", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v7.4 (透明底檢視版)")
-st.markdown("🚀 **v7.4 更新**：預覽區新增「灰白棋盤格」背景，方便檢查去背品質與白邊效果。")
+st.set_page_config(page_title="莎拉爸貼圖神器 v7.3", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v7.3 (語法修復版)")
+st.markdown("🚀 **v7.3 更新**：修復縮排錯誤，保留 v7.2 所有強大功能 (亮部保護+敏感度調節+白邊效果)。")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -27,6 +27,7 @@ if st.sidebar.button("🗑️ 清除重來 (Reset All)", type="secondary", use_c
     st.session_state.uploader_key += 1 
     st.rerun()
 
+# 這裡定義按鈕，但邏輯會在最下方執行
 run_button = st.sidebar.button("🚀 開始處理圖片 (Start)", type="primary", use_container_width=True)
 
 st.sidebar.markdown("---")
@@ -88,3 +89,27 @@ if "智慧" in slice_mode:
 elif "自動" in slice_mode:
     st.sidebar.success("✨ 程式將根據圖片長寬比，自動決定是用 6x5 還是 8x5 切割。")
 else:
+    st.sidebar.warning("⚠️ 手動模式：請自行設定行列數。")
+    c1, c2 = st.sidebar.columns(2)
+    with c1:
+        manual_rows = st.number_input("縱向列數 (Rows)", 1, 10, 3) 
+    with c2:
+        manual_cols = st.number_input("橫向行數 (Cols)", 1, 10, 4) 
+
+# --- 核心函數 ---
+
+# 1. 綠幕去背核心 (補全版)
+def remove_green_screen_hsv(img_pil, sensitivity=50, white_protect=30):
+    img = np.array(img_pil.convert("RGB"))
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    
+    # A. 建立綠幕遮罩
+    sat_threshold = 140 - int(sensitivity * 0.9) 
+    lower_green = np.array([35, sat_threshold, 40])
+    upper_green = np.array([85, 255, 255])
+    
+    green_mask = cv2.inRange(hsv, lower_green, upper_green)
+    
+    # B. 建立亮部保護遮罩
+    if white_protect >
