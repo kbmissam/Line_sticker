@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v11.0", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v11.0 (分區智慧版)")
-st.markdown("🚀 **v11.0 更新**：新增「網格引導智慧偵測」，先強制分區再智慧去背，完美解決大間距圖片的沾黏與不切問題。")
+st.set_page_config(page_title="莎拉爸貼圖神器 v11.1", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v11.1 (寬容度修正版)")
+st.markdown("🚀 **v11.1 更新**：新增「網格寬容度 (Padding)」，切割時會自動多抓一點範圍，防止切斷角色的手腳或文字。")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -53,34 +53,36 @@ border_thickness = 8
 
 if "綠幕" in remove_mode:
     st.sidebar.markdown("##### 🔧 去背微調")
-    gs_sensitivity = st.sidebar.slider("🟢 綠幕敏感度", 0, 100, 50, help="如果去背不乾淨（有綠邊），請調高；如果角色破洞，請調低。")
+    gs_sensitivity = st.sidebar.slider("🟢 綠幕敏感度", 0, 100, 50)
     highlight_protection = st.sidebar.slider("💡 亮部保護", 0, 100, 30)
 
 st.sidebar.markdown("##### ✨ 裝飾與修整")
 border_thickness = st.sidebar.slider("⚪ 白邊厚度", 0, 20, 8)
-edge_crop = st.sidebar.slider("✂️ 邊緣內縮 (Edge Crop)", 0, 20, 0, help="最後輸出的貼圖，四周強制向內修剪 X 像素，消除黑線雜訊。")
+edge_crop = st.sidebar.slider("✂️ 邊緣內縮 (Edge Crop)", 0, 20, 0)
 
 st.sidebar.header("3. 切割策略")
 slice_mode = st.sidebar.radio(
     "選擇切割方式：",
     (
-        "🛡️ 網格引導智慧偵測 (Batch 4 救星)", 
+        "🛡️ 網格引導智慧偵測 (推薦)", 
         "🧠 純智慧視覺偵測", 
         "📏 自由多線微調"
     )
 )
 
-# 變數
+# 變數初始化
 dilation_size = 25
-show_mask = False
+grid_padding = 0
 
 if "網格引導" in slice_mode:
-    st.sidebar.success("💡 **推薦使用**：此模式會先將圖片切成 12 等份，然後在每一份裡面自動去背並抓取角色。不怕沾黏，也不怕整張不切！")
+    st.sidebar.success("💡 此模式會先分區再偵測。請調整下方的「寬容度」來解決切到手/字的問題。")
+    st.sidebar.markdown("##### 🛡️ 網格設定")
+    grid_padding = st.sidebar.slider("↔️ 網格寬容度 (Padding)", 0, 100, 30, 
+                                     help="關鍵功能！數值越大，切割時會「多抓」周圍的範圍。如果發現手被切斷，請調大此數值。")
     
 elif "純智慧" in slice_mode:
     st.sidebar.markdown("##### 🧠 智慧設定")
     dilation_size = st.sidebar.slider("膨脹係數", 5, 100, 30)
-    show_mask = st.sidebar.checkbox("👀 顯示偵測遮罩 (Debug)", value=False, help="勾選後，預覽區會顯示黑白遮罩，讓你知道電腦看到了什麼。")
 
 # --- 函數定義區 ---
 
@@ -159,11 +161,11 @@ def get_grid_lines(w, h, rows=3, cols=4):
     h_lines = [int(h * i / rows) for i in range(rows + 1)]
     return v_lines, h_lines
 
-def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val=25, sensitivity=50, protect=30, border=8, edge_crop_px=0):
+def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val=25, sensitivity=50, protect=30, border=8, edge_crop_px=0, g_padding=0):
     img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     processed_stickers = []
     
-    # 先做全圖的邊緣修剪 (Pre-crop)，消除整張圖的外框干擾
+    # Pre-crop (修剪全圖邊緣雜訊)
     h_full, w_full, _ = img_cv.shape
     crop_margin = 10 
     if h_full > 100 and w_full > 100:
@@ -171,32 +173,34 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
         image_pil = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
     
     if "網格引導" in slicing_strategy:
-        # --- 策略 A: 網格引導智慧偵測 (Grid-Guided) ---
-        # 1. 強制切成 4x3
+        # --- 策略 A: 網格引導 + 寬容度 (Padding) ---
         height, width, _ = img_cv.shape
         v_lines, h_lines = get_grid_lines(width, height, 3, 4)
         
         for r in range(3):
             for c in range(4):
+                # 原始座標
                 x_start, x_end = v_lines[c], v_lines[c+1]
                 y_start, y_end = h_lines[r], h_lines[r+1]
                 
-                # 取得小方塊
+                # 應用寬容度 (Padding)
+                # 往外擴張，但不能超出圖片邊界
+                x_start = max(0, x_start - g_padding)
+                x_end = min(width, x_end + g_padding)
+                y_start = max(0, y_start - g_padding)
+                y_end = min(height, y_end + g_padding)
+                
                 chunk_cv = img_cv[y_start:y_end, x_start:x_end]
                 if chunk_cv.size == 0: continue
                 
-                # 轉成 PIL
                 chunk_pil = Image.fromarray(cv2.cvtColor(chunk_cv, cv2.COLOR_BGR2RGB))
-                
-                # 直接對小方塊進行去背與裁切 (extract_and_resize 內部會處理 bbox)
-                # 這樣就算角色只有指甲大，只要在格子裡，bbox 就會抓到它，然後放大置中
                 result = extract_and_resize(chunk_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
                 if result: processed_stickers.append(result)
                 
-        return processed_stickers, ("Grid-Smart", "Grid-Smart")
+        return processed_stickers, ("Grid+Pad", f"Pad:{g_padding}")
 
     elif "純智慧" in slicing_strategy:
-        # --- 策略 B: 純智慧視覺 (保留舊功能，加入 Debug) ---
+        # --- 策略 B: 純智慧 (HSV優化) ---
         if "綠幕" in mode_selection:
             hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
             lower_green = np.array([35, 40, 40])
@@ -209,10 +213,6 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
 
         kernel = np.ones((dilation_val, dilation_val), np.uint8)
         thresh = cv2.dilate(thresh, kernel, iterations=2)
-        
-        # 回傳遮罩供預覽
-        mask_preview = Image.fromarray(thresh) if show_mask else None
-        
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         min_area = 2000 
         valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
@@ -225,11 +225,10 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
             result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
             if result: processed_stickers.append(result)
             
-        return processed_stickers, mask_preview
+        return processed_stickers, ("Smart", "Vision")
 
     else:
-        # --- 策略 C: 自由多線 (這裡簡化回標準 4x3 以節省篇幅，v9 已有自由線) ---
-        # 為保持代碼精簡，這裡使用標準網格作為 fallback
+        # --- 策略 C: 自由多線 (這裡維持標準網格) ---
         height, width, _ = img_cv.shape
         v_lines, h_lines = get_grid_lines(width, height, 3, 4)
         for r in range(3):
@@ -270,20 +269,17 @@ if run_button:
                     # 執行處理
                     result, debug_info = process_single_image(
                         image, remove_mode, slice_mode, dilation_size, 
-                        sensitivity=gs_sensitivity, protect=highlight_protection, border=border_thickness, edge_crop_px=edge_crop
+                        sensitivity=gs_sensitivity, protect=highlight_protection, border=border_thickness, edge_crop_px=edge_crop,
+                        g_padding=grid_padding
                     )
                     
-                    # 如果是純智慧模式且開啟 Debug，顯示遮罩
-                    if "純智慧" in slice_mode and debug_info and isinstance(debug_info, Image.Image):
-                        st.image(debug_info, caption="偵測遮罩 (白=保留, 黑=切除)", width=300)
-                    
-                    st.write(f"✅ 完成 (產出 {len(result)} 張)")
+                    st.write(f"✅ 完成 (模式: {debug_info[0]}, 產出 {len(result)} 張)")
                     st.session_state.processed_stickers.extend(result)
                     progress_bar.progress((idx + 1) / len(uploaded_files))
                 
                 if not st.session_state.processed_stickers:
                     status.update(label="⚠️ 沒切出東西", state="error")
-                    st.error("⚠️ 未偵測到貼圖。請確認去背模式是否正確，或嘗試「網格引導智慧」模式。")
+                    st.error("⚠️ 未偵測到貼圖。")
                 else:
                     status.update(label="✅ 處理完成！", state="complete", expanded=False)
                     st.success(f"🎉 成功！共產出 {len(st.session_state.processed_stickers)} 張貼圖。")
@@ -315,6 +311,7 @@ if st.session_state.processed_stickers:
         
         disp_main = preview_bg_main.copy()
         disp_main.paste(main_img, (0,0), main_img)
+        
         disp_tab = preview_bg_tab.copy()
         disp_tab.paste(tab_img, (0,0), tab_img)
         
@@ -353,9 +350,9 @@ if st.session_state.processed_stickers:
         zf.writestr("tab.png", tab_byte.getvalue())
 
     st.download_button(
-        label=f"📦 下載 v11.0 完整懶人包",
+        label=f"📦 下載 v11.1 完整懶人包",
         data=zip_buffer.getvalue(),
-        file_name="SarahDad_v11.0_Stickers.zip",
+        file_name="SarahDad_v11.1_Stickers.zip",
         mime="application/zip",
         type="primary"
     )
