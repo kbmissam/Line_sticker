@@ -247,4 +247,88 @@ def create_resized_image(img, target_size):
     bg.paste(img, (left, top))
     return bg
     
-def create
+def create_checkerboard_bg(size, grid_size=20):
+    bg = Image.new("RGB", size, (220, 220, 220))
+    draw = ImageDraw.Draw(bg)
+    for y in range(0, size[1], grid_size):
+        for x in range(0, size[0], grid_size):
+            if (x // grid_size + y // grid_size) % 2 == 0:
+                draw.rectangle([x, y, x+grid_size, y+grid_size], fill=(255, 255, 255))
+    return bg
+
+# --- 主程式 ---
+if run_button:
+    if not uploaded_files:
+        st.error("❌ 請先上傳圖片！")
+    else:
+        st.toast("🚀 啟動影視級去背引擎...", icon="✨")
+        st.session_state.processed_stickers = []
+        st.session_state.original_images = []
+        
+        with st.status("正在進行 Despill 與 Alpha Matting 運算...", expanded=True) as status:
+            prog = st.progress(0)
+            for i, f in enumerate(uploaded_files):
+                img = Image.open(f).convert("RGB")
+                st.session_state.original_images.append((f.name, img))
+                
+                res = process_image(
+                    img, slice_mode, grid_padding, 
+                    gs_sensitivity, highlight_protection, border_thickness,
+                    despill_level, mask_erode, edge_softness
+                )
+                st.session_state.processed_stickers.extend(res)
+                prog.progress((i+1)/len(uploaded_files))
+            
+            if st.session_state.processed_stickers:
+                status.update(label="✅ 畫質優化完成", state="complete", expanded=False)
+                st.success(f"🎉 成功產出 {len(st.session_state.processed_stickers)} 張高畫質貼圖！")
+            else:
+                status.update(label="⚠️ 失敗", state="error")
+                st.error("未偵測到貼圖，請調整參數。")
+
+# 預覽區 (保持不變)
+if st.session_state.processed_stickers:
+    st.divider()
+    st.header("🖼️ 成果預覽")
+    
+    opts = [f"{i+1:02d}" for i in range(len(st.session_state.processed_stickers))]
+    c1, c2 = st.columns([1, 2])
+    
+    with c1:
+        st.subheader("設定縮圖")
+        m_idx = int(st.selectbox("Main", opts, index=0)) - 1
+        t_idx = int(st.selectbox("Tab", opts, index=0)) - 1
+        
+        m_img = create_resized_image(st.session_state.processed_stickers[m_idx], (240, 240))
+        t_img = create_resized_image(st.session_state.processed_stickers[t_idx], (96, 74))
+        
+        bg_m = create_checkerboard_bg((240, 240))
+        bg_m.paste(m_img, (0,0), m_img)
+        st.image(bg_m, caption="Main")
+        
+        bg_t = create_checkerboard_bg((96, 74), 10)
+        bg_t.paste(t_img, (0,0), t_img)
+        st.image(bg_t, caption="Tab")
+
+    with c2:
+        st.subheader("全部貼圖")
+        cols = st.columns(6)
+        bg = create_checkerboard_bg((370, 320), 32)
+        for i, s in enumerate(st.session_state.processed_stickers):
+            disp = bg.copy()
+            disp.paste(s, (0,0), s)
+            cols[i%6].image(disp, caption=f"{i+1:02d}", use_container_width=True)
+
+    st.divider()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for i, s in enumerate(st.session_state.processed_stickers):
+            b = io.BytesIO()
+            s.save(b, "PNG")
+            zf.writestr(f"Stickers/{i+1:02d}.png", b.getvalue())
+        
+        bm, bt = io.BytesIO(), io.BytesIO()
+        m_img.save(bm, "PNG"); zf.writestr("main.png", bm.getvalue())
+        t_img.save(bt, "PNG"); zf.writestr("tab.png", bt.getvalue())
+            
+    st.download_button("📦 下載 v13.0 懶人包", buf.getvalue(), "SarahDad_v13.0.zip", "application/zip", type="primary")
