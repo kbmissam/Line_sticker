@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v8.0", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v8.0 (網格校正版)")
-st.markdown("🚀 **v8.0 更新**：新增「網格紅線預覽」與「X/Y 軸位移校正」，專門解決切到道具的問題。")
+st.set_page_config(page_title="莎拉爸貼圖神器 v9.0", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v9.0 (自由手術刀版)")
+st.markdown("🚀 **v9.0 更新**：解鎖「多線獨立控制」，可單獨調整 3 條垂直線與 2 條水平線，完美避開長寬不一的角色。")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -18,8 +18,6 @@ if 'original_images' not in st.session_state:
     st.session_state.original_images = []
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
-if 'preview_image' not in st.session_state:
-    st.session_state.preview_image = None
 
 # --- 側邊欄：控制台 ---
 st.sidebar.header("⚙️ 控制台")
@@ -27,7 +25,6 @@ st.sidebar.header("⚙️ 控制台")
 if st.sidebar.button("🗑️ 清除重來 (Reset All)", type="secondary", use_container_width=True):
     st.session_state.processed_stickers = []
     st.session_state.original_images = []
-    st.session_state.preview_image = None
     st.session_state.uploader_key += 1 
     st.rerun()
 
@@ -61,54 +58,76 @@ if "綠幕" in remove_mode:
 
 st.sidebar.markdown("##### ✨ 裝飾與修整")
 border_thickness = st.sidebar.slider("⚪ 白邊厚度", 0, 20, 8)
-edge_crop = st.sidebar.slider("✂️ 邊緣內縮 (Edge Crop)", 0, 20, 0, help="如果用智慧模式還是有雜訊，可稍微調高。")
+edge_crop = st.sidebar.slider("✂️ 邊緣內縮 (Edge Crop)", 0, 20, 0)
 
 st.sidebar.header("3. 切割策略")
 slice_mode = st.sidebar.radio(
     "選擇切割方式：",
     (
-        "🧠 智慧視覺偵測 (推薦 Batch 4)", 
-        "📏 強制網格 (手動設定 + 校正)"
+        "📏 自由多線微調 (推薦 Batch 4)", 
+        "🧠 智慧視覺偵測", 
+        "🤖 強制網格 (平均分配)"
     )
 )
 
-# 變數初始化
-manual_rows, manual_cols = 3, 4
-dilation_size = 35 # 預設加大，適應分離物件
-offset_x = 0
-offset_y = 0
+# --- v9.0 核心：多線獨立控制變數 ---
+# 預設偏移量都為 0
+off_v1, off_v2, off_v3 = 0, 0, 0
+off_h1, off_h2 = 0, 0
+dilation_size = 35
 
 if "智慧" in slice_mode:
-    dilation_size = st.sidebar.slider("膨脹係數 (防切散)", 5, 100, 35, help="數值越大，越能把分離的文字和人視為同一張圖。Batch 4 建議設 35 以上。")
-    st.sidebar.info("💡 **強烈建議**：Batch 4 (大間距) 請優先使用此模式，它會自動避開沙發邊緣。")
-else:
-    st.sidebar.warning("⚠️ 手動模式：若切到道具，請調整下方的「位移校正」。")
-    c1, c2 = st.sidebar.columns(2)
-    with c1: manual_rows = st.number_input("Rows", 1, 10, 3) 
-    with c2: manual_cols = st.number_input("Cols", 1, 10, 4) 
+    dilation_size = st.sidebar.slider("膨脹係數 (防切散)", 5, 100, 35)
+    st.sidebar.info("💡 智慧模式會自動偵測物體邊緣。")
     
-    st.sidebar.markdown("##### 📐 網格校正 (Grid Offset)")
-    offset_x = st.sidebar.slider("↔️ X 軸位移 (左右)", -100, 100, 0, help="正數向右移，負數向左移。")
-    offset_y = st.sidebar.slider("↕️ Y 軸位移 (上下)", -100, 100, 0, help="正數向下移，負數向上移。")
+elif "自由" in slice_mode:
+    st.sidebar.markdown("### 🔪 手術刀切割 (偏移校正)")
+    st.sidebar.info("請看著右側預覽圖，調整下方的線條位置。")
+    
+    with st.sidebar.expander("↕️ 直向切割線 (Vertical)", expanded=True):
+        st.caption("調整垂直線 (左右移動)")
+        off_v1 = st.slider("線 1 (第1-2欄之間)", -100, 100, 0)
+        off_v2 = st.slider("線 2 (第2-3欄之間)", -100, 100, 0)
+        off_v3 = st.slider("線 3 (第3-4欄之間)", -100, 100, 0)
+
+    with st.sidebar.expander("↔️ 橫向切割線 (Horizontal)", expanded=True):
+        st.caption("調整水平線 (上下移動)")
+        off_h1 = st.slider("線 A (第1-2列之間)", -100, 100, 0)
+        off_h2 = st.slider("線 B (第2-3列之間)", -100, 100, 0)
+
+else:
+    st.sidebar.warning("⚠️ 標準模式：平均切割 4x3 網格。")
 
 # --- 核心函數 ---
 
-def draw_grid_preview(img_pil, rows, cols, off_x, off_y):
-    """繪製預覽網格線"""
+def get_grid_lines(w, h, ov1, ov2, ov3, oh1, oh2):
+    """計算所有切割線的絕對坐標"""
+    # 預設平均值
+    base_v1 = w // 4
+    base_v2 = w * 2 // 4
+    base_v3 = w * 3 // 4
+    
+    base_h1 = h // 3
+    base_h2 = h * 2 // 3
+    
+    # 加上使用者偏移量
+    v_lines = [0, base_v1 + ov1, base_v2 + ov2, base_v3 + ov3, w]
+    h_lines = [0, base_h1 + oh1, base_h2 + oh2, h]
+    
+    return v_lines, h_lines
+
+def draw_freeline_preview(img_pil, v_lines, h_lines):
+    """繪製 v9.0 的自由線預覽"""
     img = img_pil.copy()
     draw = ImageDraw.Draw(img)
     w, h = img.size
-    cell_w = w // cols
-    cell_h = h // rows
     
-    # 畫直線 (X軸)
-    for c in range(1, cols):
-        x = c * cell_w + off_x
+    # 畫垂直線 (跳過頭尾 0 和 w)
+    for x in v_lines[1:-1]:
         draw.line([(x, 0), (x, h)], fill="red", width=5)
     
-    # 畫橫線 (Y軸)
-    for r in range(1, rows):
-        y = r * cell_h + off_y
+    # 畫水平線 (跳過頭尾 0 和 h)
+    for y in h_lines[1:-1]:
         draw.line([(0, y), (w, y)], fill="red", width=5)
         
     return img
@@ -132,233 +151,4 @@ def remove_green_screen_hsv(img_pil, sensitivity=50, white_protect=30):
     else:
         final_green_mask = green_mask
 
-    img_rgba = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2BGRA)
-    img_rgba[final_green_mask > 0] = (0, 0, 0, 0)
-    return Image.fromarray(cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2RGBA))
-
-def add_stroke(img_pil, thickness=8, color=(255, 255, 255, 255)):
-    if thickness == 0: return img_pil
-    img = img_pil.convert("RGBA")
-    r, g, b, a = img.split()
-    alpha_np = np.array(a)
-    kernel = np.ones((thickness * 2 + 1, thickness * 2 + 1), np.uint8)
-    outline_alpha = cv2.dilate(alpha_np, kernel, iterations=1)
-    stroke_bg = Image.new("RGBA", img.size, color)
-    stroke_bg.putalpha(Image.fromarray(outline_alpha))
-    final_img = Image.alpha_composite(stroke_bg, img)
-    return final_img
-
-def extract_and_resize(sticker_img_pil, mode_selection, sensitivity, protect, border, edge_crop_px):
-    if "綠幕" in mode_selection:
-        sticker_no_bg = remove_green_screen_hsv(sticker_img_pil, sensitivity, protect)
-    else:
-        sticker_no_bg = remove(sticker_img_pil)
-    
-    if edge_crop_px > 0:
-        w, h = sticker_no_bg.size
-        if w > edge_crop_px*2 and h > edge_crop_px*2:
-            sticker_no_bg = sticker_no_bg.crop((edge_crop_px, edge_crop_px, w - edge_crop_px, h - edge_crop_px))
-    
-    bbox = sticker_no_bg.getbbox()
-    if bbox:
-        sticker_cropped = sticker_no_bg.crop(bbox)
-        if border > 0: sticker_cropped = add_stroke(sticker_cropped, border)
-        sticker_cropped.thumbnail((370, 320), Image.Resampling.LANCZOS)
-        final_bg = Image.new("RGBA", (370, 320), (0, 0, 0, 0))
-        left = (370 - sticker_cropped.width) // 2
-        top = (320 - sticker_cropped.height) // 2
-        final_bg.paste(sticker_cropped, (left, top))
-        return final_bg
-    return None
-
-def create_checkerboard_bg(size, grid_size=20):
-    bg = Image.new("RGB", size, (220, 220, 220))
-    draw = ImageDraw.Draw(bg)
-    for y in range(0, size[1], grid_size):
-        for x in range(0, size[0], grid_size):
-            if (x // grid_size + y // grid_size) % 2 == 0:
-                draw.rectangle([x, y, x+grid_size, y+grid_size], fill=(255, 255, 255))
-    return bg
-
-def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val=25, man_r=3, man_c=4, sensitivity=50, protect=30, border=8, edge_crop_px=0, off_x=0, off_y=0):
-    img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-    processed_stickers = []
-    
-    use_grid = False
-    grid_rows, grid_cols = man_r, man_c 
-    
-    if "智慧" in slicing_strategy: use_grid = False
-    elif "強制" in slicing_strategy: use_grid = True
-
-    # 切割邏輯
-    if not use_grid:
-        # Smart Vision
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-        kernel = np.ones((dilation_val, dilation_val), np.uint8)
-        thresh = cv2.dilate(thresh, kernel, iterations=2)
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        min_area = 1000 
-        valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
-        bounding_boxes = [cv2.boundingRect(c) for c in valid_contours]
-        bounding_boxes.sort(key=lambda x: (round(x[1]/100), x[0]))
-        for x, y, w, h in bounding_boxes:
-            sticker_cv = img_cv[y:y+h, x:x+w]
-            sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
-            result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
-            if result: processed_stickers.append(result)
-    else:
-        # Manual Grid with Offset
-        height, width, _ = img_cv.shape
-        cell_h = height // grid_rows
-        cell_w = width // grid_cols
-        
-        for r in range(grid_rows):
-            for c in range(grid_cols):
-                # 套用位移校正
-                x = c * cell_w + off_x
-                y = r * cell_h + off_y
-                
-                # 邊界檢查，防止切出去
-                x = max(0, x)
-                y = max(0, y)
-                w_cut = cell_w
-                h_cut = cell_h
-                
-                sticker_cv = img_cv[y:y+h_cut, x:x+w_cut]
-                
-                # 若切出去導致圖片為空，跳過
-                if sticker_cv.size == 0: continue
-                    
-                sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
-                result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
-                if result: processed_stickers.append(result)
-
-    return processed_stickers, (grid_rows, grid_cols) if use_grid else ("Smart", "Smart")
-
-def create_resized_image(img, target_size):
-    img = img.copy()
-    img.thumbnail(target_size, Image.Resampling.LANCZOS)
-    bg = Image.new("RGBA", target_size, (0, 0, 0, 0))
-    left = (target_size[0] - img.width) // 2
-    top = (target_size[1] - img.height) // 2
-    bg.paste(img, (left, top))
-    return bg
-
-# --- 主程式執行區 ---
-
-# 預覽區塊 (放在上傳之後，執行之前)
-if uploaded_files and "強制" in slice_mode:
-    st.info("📏 **網格校正預覽**：請觀察紅線是否切到角色。若切到，請調整側邊欄的 X/Y 位移。")
-    # 只拿第一張圖來做預覽
-    first_img = Image.open(uploaded_files[0]).convert("RGB")
-    preview_img = draw_grid_preview(first_img, manual_rows, manual_cols, offset_x, offset_y)
-    st.image(preview_img, caption="切割線預覽 (紅色)", width=500)
-
-if run_button:
-    if not uploaded_files:
-        st.error("❌ 請先上傳圖片！")
-    else:
-        st.toast("🚀 開始處理...", icon="🔥")
-        st.session_state.processed_stickers = []
-        st.session_state.original_images = []
-        
-        with st.status("正在全力加工中...", expanded=True) as status:
-            progress_bar = st.progress(0)
-            try:
-                for idx, uploaded_file in enumerate(uploaded_files):
-                    st.write(f"📥 讀取：{uploaded_file.name}")
-                    image = Image.open(uploaded_file).convert("RGB")
-                    st.session_state.original_images.append((uploaded_file.name, image))
-                    
-                    stickers, strategy_used = process_single_image(
-                        image, remove_mode, slice_mode, dilation_size, 
-                        manual_rows, manual_cols,
-                        gs_sensitivity, highlight_protection, border_thickness, edge_crop,
-                        offset_x, offset_y
-                    )
-                    
-                    st.write(f"✅ 完成 (產出 {len(stickers)} 張)")
-                    st.session_state.processed_stickers.extend(stickers)
-                    progress_bar.progress((idx + 1) / len(uploaded_files))
-                
-                if not st.session_state.processed_stickers:
-                    status.update(label="⚠️ 沒切出東西，請檢查設定", state="error")
-                    st.error("⚠️ 未偵測到貼圖，請檢查切割策略或去背設定。")
-                else:
-                    status.update(label="✅ 處理完成！", state="complete", expanded=False)
-                    st.success(f"🎉 成功！共產出 {len(st.session_state.processed_stickers)} 張貼圖。")
-                    
-            except Exception as e:
-                status.update(label="❌ 發生錯誤", state="error")
-                st.error(f"程式執行錯誤: {e}")
-
-# --- 下載區 (省略重複代碼，功能同上) ---
-if st.session_state.processed_stickers:
-    # ... (保持原有的下載區塊代碼) ...
-    st.divider()
-    st.header("🖼️ 貼圖總覽與設定")
-    
-    total_stickers = len(st.session_state.processed_stickers)
-    sticker_options = [f"{i+1:02d}" for i in range(total_stickers)]
-    
-    col_selectors, col_preview = st.columns([1, 2])
-    
-    preview_bg_main = create_checkerboard_bg((240, 240), grid_size=20)
-    preview_bg_tab = create_checkerboard_bg((96, 74), grid_size=10)
-
-    with col_selectors:
-        st.subheader("設定關鍵圖片")
-        main_idx = int(st.selectbox("⭐ Main 圖片", sticker_options, index=0)) - 1
-        tab_idx = int(st.selectbox("🏷️ Tab 圖片", sticker_options, index=0)) - 1
-        
-        main_img = create_resized_image(st.session_state.processed_stickers[main_idx], (240, 240))
-        tab_img = create_resized_image(st.session_state.processed_stickers[tab_idx], (96, 74))
-        
-        disp_main = preview_bg_main.copy()
-        disp_main.paste(main_img, (0,0), main_img)
-        
-        disp_tab = preview_bg_tab.copy()
-        disp_tab.paste(tab_img, (0,0), tab_img)
-        
-        c1, c2 = st.columns(2)
-        c1.image(disp_main, caption="Main (預覽)")
-        c2.image(disp_tab, caption="Tab (預覽)")
-
-    with col_preview:
-        st.subheader("全部預覽 (棋盤底檢視)")
-        preview_cols = st.columns(6)
-        standard_bg = create_checkerboard_bg((370, 320), grid_size=32)
-
-        for i, sticker in enumerate(st.session_state.processed_stickers):
-            with preview_cols[i % 6]:
-                disp_img = standard_bg.copy()
-                disp_img.paste(sticker, (0, 0), sticker)
-                st.image(disp_img, caption=f"{i+1:02d}", use_container_width=True)
-
-    st.divider()
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w") as zf:
-        for name, img in st.session_state.original_images:
-            img_byte = io.BytesIO()
-            img.save(img_byte, format='PNG')
-            zf.writestr(f"Originals/{name.replace('.jpg','.png')}", img_byte.getvalue())
-        for i, sticker in enumerate(st.session_state.processed_stickers):
-            sticker_byte = io.BytesIO()
-            sticker.save(sticker_byte, format='PNG')
-            zf.writestr(f"Stickers/{i+1:02d}.png", sticker_byte.getvalue())
-        
-        main_byte = io.BytesIO()
-        main_img.save(main_byte, format='PNG')
-        zf.writestr("main.png", main_byte.getvalue())
-        tab_byte = io.BytesIO()
-        tab_img.save(tab_byte, format='PNG')
-        zf.writestr("tab.png", tab_byte.getvalue())
-
-    st.download_button(
-        label=f"📦 下載 v8.0 完整懶人包",
-        data=zip_buffer.getvalue(),
-        file_name="SarahDad_v8.0_Stickers.zip",
-        mime="application/zip",
-        type="primary"
-    )
+    img_rgba = cv2.cvtColor
