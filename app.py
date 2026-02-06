@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v7.7", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v7.7 (完整修復版)")
-st.markdown("🚀 **v7.7 更新**：依據 Claude 健檢報告修復函數截斷與變數邏輯，針對 4x3 批次優化預設值。")
+st.set_page_config(page_title="莎拉爸貼圖神器 v7.8", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v7.8 (邊緣淨化版)")
+st.markdown("🚀 **v7.8 更新**：新增「邊緣內縮」滑桿，專門用來修剪掉切割後殘留的黑線或雜訊。")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -22,7 +22,7 @@ if 'uploader_key' not in st.session_state:
 # --- 側邊欄：控制台 ---
 st.sidebar.header("⚙️ 控制台")
 
-# 清除按鈕邏輯
+# 清除按鈕
 if st.sidebar.button("🗑️ 清除重來 (Reset All)", type="secondary", use_container_width=True):
     st.session_state.processed_stickers = []
     st.session_state.original_images = []
@@ -49,24 +49,31 @@ remove_mode = st.sidebar.radio(
     ("🟢 綠幕模式 (專家微調)", "🤖 AI 模式 (白底用)")
 )
 
-# 初始化變數 (避免 Claude 指出的作用域問題)
+# 初始化變數
 gs_sensitivity = 50
 highlight_protection = 30 
 border_thickness = 8
 
 if "綠幕" in remove_mode:
-    st.sidebar.markdown("##### 🔧 去背微調 (修復破洞)")
+    st.sidebar.markdown("##### 🔧 去背微調")
     gs_sensitivity = st.sidebar.slider(
         "🟢 綠幕敏感度", 0, 100, 50, 
-        help="數值越小越安全，數值越大去得越乾淨但可能破洞。"
+        help="數值越小越安全。若去背不乾淨可調高，若破洞可調低。"
     )
     highlight_protection = st.sidebar.slider(
         "💡 亮部保護", 0, 100, 30, 
-        help="保護白色反光不被切掉。數值越高保護越強。"
+        help="保護白色區域不被誤刪。"
     )
 
-st.sidebar.markdown("##### ✨ 裝飾設定")
+st.sidebar.markdown("##### ✨ 裝飾與修整")
 border_thickness = st.sidebar.slider("⚪ 白邊厚度 (0=無邊)", 0, 20, 8)
+
+# v7.8 新增功能：邊緣內縮
+edge_crop = st.sidebar.slider(
+    "✂️ 邊緣內縮 (Edge Crop)", 
+    0, 20, 5, 
+    help="【解決黑線神器】將切割後的貼圖四周向內修剪 X 像素。如果看到邊緣有殘留線條，請調大此數值 (建議 3-5)。"
+)
 
 st.sidebar.header("3. 切割策略")
 slice_mode = st.sidebar.radio(
@@ -78,7 +85,6 @@ slice_mode = st.sidebar.radio(
     )
 )
 
-# 針對您現在的 4x3 需求，將預設值調整為 3, 4
 manual_rows, manual_cols = 3, 4
 dilation_size = 25
 
@@ -88,41 +94,36 @@ if "智慧" in slice_mode:
 elif "自動" in slice_mode:
     st.sidebar.success("✨ 程式將根據圖片長寬比，自動決定是用 6x5 還是 8x5 切割。")
 else:
-    st.sidebar.warning("⚠️ 手動模式預設為 3x4 (適合小籠包批次)。")
+    st.sidebar.warning("⚠️ 手動模式預設為 3x4 (適合小籠包/西裝大叔批次)。")
     c1, c2 = st.sidebar.columns(2)
     with c1:
         manual_rows = st.number_input("縱向列數 (Rows)", 1, 10, 3) 
     with c2:
         manual_cols = st.number_input("橫向行數 (Cols)", 1, 10, 4) 
 
-# --- 核心函數定義區 (完整無截斷) ---
+# --- 核心函數定義區 ---
 
 def remove_green_screen_hsv(img_pil, sensitivity=50, white_protect=30):
-    # 這是 Claude 指出之前被截斷的函數，現在完整補上
     img = np.array(img_pil.convert("RGB"))
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     
-    # 綠色範圍定義
     sat_threshold = 140 - int(sensitivity * 0.9) 
     lower_green = np.array([35, sat_threshold, 40])
     upper_green = np.array([85, 255, 255])
     
     green_mask = cv2.inRange(hsv, lower_green, upper_green)
     
-    # 亮部保護邏輯
     if white_protect > 0:
         protect_s_max = int(white_protect * 0.8) 
         protect_v_min = 255 - int(white_protect * 1.5) 
         lower_white = np.array([0, 0, protect_v_min])      
         upper_white = np.array([180, protect_s_max, 255]) 
         white_mask = cv2.inRange(hsv, lower_white, upper_white)
-        # 從綠色遮罩中扣除白色保護區
         final_green_mask = cv2.bitwise_and(green_mask, cv2.bitwise_not(white_mask))
     else:
         final_green_mask = green_mask
 
-    # 轉為透明背景
     img_rgba = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2BGRA)
     img_rgba[final_green_mask > 0] = (0, 0, 0, 0)
     return Image.fromarray(cv2.cvtColor(img_rgba, cv2.COLOR_BGRA2RGBA))
@@ -139,20 +140,28 @@ def add_stroke(img_pil, thickness=8, color=(255, 255, 255, 255)):
     final_img = Image.alpha_composite(stroke_bg, img)
     return final_img
 
-def extract_and_resize(sticker_img_pil, mode_selection, sensitivity, protect, border):
+def extract_and_resize(sticker_img_pil, mode_selection, sensitivity, protect, border, edge_crop_px):
     # 1. 去背
     if "綠幕" in mode_selection:
         sticker_no_bg = remove_green_screen_hsv(sticker_img_pil, sensitivity, protect)
     else:
         sticker_no_bg = remove(sticker_img_pil)
     
-    # 2. 裁切與後製
+    # 2. v7.8 新增：邊緣內縮 (在計算 bbox 之前先修邊)
+    # 這一步可以直接把最外圍的雜訊切掉，避免它們影響 bbox 的判斷
+    if edge_crop_px > 0:
+        w, h = sticker_no_bg.size
+        # 確保不會切到負數
+        if w > edge_crop_px*2 and h > edge_crop_px*2:
+            sticker_no_bg = sticker_no_bg.crop((edge_crop_px, edge_crop_px, w - edge_crop_px, h - edge_crop_px))
+    
+    # 3. 裁切 (bbox)
     bbox = sticker_no_bg.getbbox()
     if bbox:
         sticker_cropped = sticker_no_bg.crop(bbox)
         if border > 0: sticker_cropped = add_stroke(sticker_cropped, border)
         
-        # 3. 縮放與畫布補正 (強制 370x320 偶數)
+        # 4. 縮放與畫布補正 (強制 370x320 偶數)
         sticker_cropped.thumbnail((370, 320), Image.Resampling.LANCZOS)
         final_bg = Image.new("RGBA", (370, 320), (0, 0, 0, 0))
         left = (370 - sticker_cropped.width) // 2
@@ -170,12 +179,12 @@ def create_checkerboard_bg(size, grid_size=20):
                 draw.rectangle([x, y, x+grid_size, y+grid_size], fill=(255, 255, 255))
     return bg
 
-def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val=25, man_r=3, man_c=4, sensitivity=50, protect=30, border=8):
+def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val=25, man_r=3, man_c=4, sensitivity=50, protect=30, border=8, edge_crop_px=5):
     img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     processed_stickers = []
     
     use_grid = False
-    grid_rows, grid_cols = man_r, man_c # 預設使用傳入的手動參數
+    grid_rows, grid_cols = man_r, man_c 
     
     if "智慧" in slicing_strategy: use_grid = False
     elif "手動" in slicing_strategy: use_grid = True
@@ -200,7 +209,7 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
         for x, y, w, h in bounding_boxes:
             sticker_cv = img_cv[y:y+h, x:x+w]
             sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
-            result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border)
+            result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
             if result: processed_stickers.append(result)
     else:
         height, width, _ = img_cv.shape
@@ -212,7 +221,7 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
                 y = r * cell_h
                 sticker_cv = img_cv[y:y+cell_h, x:x+cell_w]
                 sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
-                result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border)
+                result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
                 if result: processed_stickers.append(result)
 
     return processed_stickers, (grid_rows, grid_cols) if use_grid else ("Smart", "Smart")
@@ -228,7 +237,6 @@ def create_resized_image(img, target_size):
 
 # --- 主程式執行區 ---
 
-# 確保按鈕被按下時有明顯反應
 if run_button:
     if not uploaded_files:
         st.error("❌ 請先上傳圖片！")
@@ -248,7 +256,7 @@ if run_button:
                     stickers, strategy_used = process_single_image(
                         image, remove_mode, slice_mode, dilation_size, 
                         manual_rows, manual_cols,
-                        gs_sensitivity, highlight_protection, border_thickness
+                        gs_sensitivity, highlight_protection, border_thickness, edge_crop
                     )
                     
                     st.write(f"✅ 完成 (模式: {strategy_used[1]}x{strategy_used[0]}, 產出 {len(stickers)} 張)")
@@ -329,9 +337,9 @@ if st.session_state.processed_stickers:
         zf.writestr("tab.png", tab_byte.getvalue())
 
     st.download_button(
-        label=f"📦 下載 v7.7 完整懶人包",
+        label=f"📦 下載 v7.8 完整懶人包",
         data=zip_buffer.getvalue(),
-        file_name="SarahDad_v7.7_Stickers.zip",
+        file_name="SarahDad_v7.8_Stickers.zip",
         mime="application/zip",
         type="primary"
     )
