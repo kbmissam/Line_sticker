@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v7.8", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v7.8 (邊緣淨化版)")
-st.markdown("🚀 **v7.8 更新**：新增「邊緣內縮」滑桿，專門用來修剪掉切割後殘留的黑線或雜訊。")
+st.set_page_config(page_title="莎拉爸貼圖神器 v8.0", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v8.0 (網格校正版)")
+st.markdown("🚀 **v8.0 更新**：新增「網格紅線預覽」與「X/Y 軸位移校正」，專門解決切到道具的問題。")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -18,18 +18,19 @@ if 'original_images' not in st.session_state:
     st.session_state.original_images = []
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
+if 'preview_image' not in st.session_state:
+    st.session_state.preview_image = None
 
 # --- 側邊欄：控制台 ---
 st.sidebar.header("⚙️ 控制台")
 
-# 清除按鈕
 if st.sidebar.button("🗑️ 清除重來 (Reset All)", type="secondary", use_container_width=True):
     st.session_state.processed_stickers = []
     st.session_state.original_images = []
+    st.session_state.preview_image = None
     st.session_state.uploader_key += 1 
     st.rerun()
 
-# 執行按鈕
 run_button = st.sidebar.button("🚀 開始處理圖片 (Start)", type="primary", use_container_width=True)
 
 st.sidebar.markdown("---")
@@ -37,7 +38,7 @@ st.sidebar.markdown("---")
 # --- 側邊欄：設定區 ---
 st.sidebar.header("1. 上傳圖片")
 uploaded_files = st.sidebar.file_uploader(
-    "請上傳貼圖大圖 (可多選混搭)", 
+    "請上傳貼圖大圖", 
     type=["jpg", "jpeg", "png"], 
     accept_multiple_files=True,
     key=f"uploader_{st.session_state.uploader_key}"
@@ -49,69 +50,76 @@ remove_mode = st.sidebar.radio(
     ("🟢 綠幕模式 (專家微調)", "🤖 AI 模式 (白底用)")
 )
 
-# 初始化變數
 gs_sensitivity = 50
 highlight_protection = 30 
 border_thickness = 8
 
 if "綠幕" in remove_mode:
     st.sidebar.markdown("##### 🔧 去背微調")
-    gs_sensitivity = st.sidebar.slider(
-        "🟢 綠幕敏感度", 0, 100, 50, 
-        help="數值越小越安全。若去背不乾淨可調高，若破洞可調低。"
-    )
-    highlight_protection = st.sidebar.slider(
-        "💡 亮部保護", 0, 100, 30, 
-        help="保護白色區域不被誤刪。"
-    )
+    gs_sensitivity = st.sidebar.slider("🟢 綠幕敏感度", 0, 100, 50)
+    highlight_protection = st.sidebar.slider("💡 亮部保護", 0, 100, 30)
 
 st.sidebar.markdown("##### ✨ 裝飾與修整")
-border_thickness = st.sidebar.slider("⚪ 白邊厚度 (0=無邊)", 0, 20, 8)
-
-# v7.8 新增功能：邊緣內縮
-edge_crop = st.sidebar.slider(
-    "✂️ 邊緣內縮 (Edge Crop)", 
-    0, 20, 5, 
-    help="【解決黑線神器】將切割後的貼圖四周向內修剪 X 像素。如果看到邊緣有殘留線條，請調大此數值 (建議 3-5)。"
-)
+border_thickness = st.sidebar.slider("⚪ 白邊厚度", 0, 20, 8)
+edge_crop = st.sidebar.slider("✂️ 邊緣內縮 (Edge Crop)", 0, 20, 0, help="如果用智慧模式還是有雜訊，可稍微調高。")
 
 st.sidebar.header("3. 切割策略")
 slice_mode = st.sidebar.radio(
     "選擇切割方式：",
     (
-        "🧠 智慧視覺偵測 (不限格數)", 
-        "🤖 強制網格 (自動判斷 6x5 / 8x5)", 
-        "📏 強制網格 (手動設定)"
+        "🧠 智慧視覺偵測 (推薦 Batch 4)", 
+        "📏 強制網格 (手動設定 + 校正)"
     )
 )
 
+# 變數初始化
 manual_rows, manual_cols = 3, 4
-dilation_size = 25
+dilation_size = 35 # 預設加大，適應分離物件
+offset_x = 0
+offset_y = 0
 
 if "智慧" in slice_mode:
-    dilation_size = st.sidebar.slider("膨脹係數 (防切字)", 5, 50, 25)
-    st.sidebar.info("💡 適合：排列不規則，但間距必須足夠。")
-elif "自動" in slice_mode:
-    st.sidebar.success("✨ 程式將根據圖片長寬比，自動決定是用 6x5 還是 8x5 切割。")
+    dilation_size = st.sidebar.slider("膨脹係數 (防切散)", 5, 100, 35, help="數值越大，越能把分離的文字和人視為同一張圖。Batch 4 建議設 35 以上。")
+    st.sidebar.info("💡 **強烈建議**：Batch 4 (大間距) 請優先使用此模式，它會自動避開沙發邊緣。")
 else:
-    st.sidebar.warning("⚠️ 手動模式預設為 3x4 (適合小籠包/西裝大叔批次)。")
+    st.sidebar.warning("⚠️ 手動模式：若切到道具，請調整下方的「位移校正」。")
     c1, c2 = st.sidebar.columns(2)
-    with c1:
-        manual_rows = st.number_input("縱向列數 (Rows)", 1, 10, 3) 
-    with c2:
-        manual_cols = st.number_input("橫向行數 (Cols)", 1, 10, 4) 
+    with c1: manual_rows = st.number_input("Rows", 1, 10, 3) 
+    with c2: manual_cols = st.number_input("Cols", 1, 10, 4) 
+    
+    st.sidebar.markdown("##### 📐 網格校正 (Grid Offset)")
+    offset_x = st.sidebar.slider("↔️ X 軸位移 (左右)", -100, 100, 0, help="正數向右移，負數向左移。")
+    offset_y = st.sidebar.slider("↕️ Y 軸位移 (上下)", -100, 100, 0, help="正數向下移，負數向上移。")
 
-# --- 核心函數定義區 ---
+# --- 核心函數 ---
+
+def draw_grid_preview(img_pil, rows, cols, off_x, off_y):
+    """繪製預覽網格線"""
+    img = img_pil.copy()
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    cell_w = w // cols
+    cell_h = h // rows
+    
+    # 畫直線 (X軸)
+    for c in range(1, cols):
+        x = c * cell_w + off_x
+        draw.line([(x, 0), (x, h)], fill="red", width=5)
+    
+    # 畫橫線 (Y軸)
+    for r in range(1, rows):
+        y = r * cell_h + off_y
+        draw.line([(0, y), (w, y)], fill="red", width=5)
+        
+    return img
 
 def remove_green_screen_hsv(img_pil, sensitivity=50, white_protect=30):
     img = np.array(img_pil.convert("RGB"))
     img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
-    
     sat_threshold = 140 - int(sensitivity * 0.9) 
     lower_green = np.array([35, sat_threshold, 40])
     upper_green = np.array([85, 255, 255])
-    
     green_mask = cv2.inRange(hsv, lower_green, upper_green)
     
     if white_protect > 0:
@@ -141,27 +149,20 @@ def add_stroke(img_pil, thickness=8, color=(255, 255, 255, 255)):
     return final_img
 
 def extract_and_resize(sticker_img_pil, mode_selection, sensitivity, protect, border, edge_crop_px):
-    # 1. 去背
     if "綠幕" in mode_selection:
         sticker_no_bg = remove_green_screen_hsv(sticker_img_pil, sensitivity, protect)
     else:
         sticker_no_bg = remove(sticker_img_pil)
     
-    # 2. v7.8 新增：邊緣內縮 (在計算 bbox 之前先修邊)
-    # 這一步可以直接把最外圍的雜訊切掉，避免它們影響 bbox 的判斷
     if edge_crop_px > 0:
         w, h = sticker_no_bg.size
-        # 確保不會切到負數
         if w > edge_crop_px*2 and h > edge_crop_px*2:
             sticker_no_bg = sticker_no_bg.crop((edge_crop_px, edge_crop_px, w - edge_crop_px, h - edge_crop_px))
     
-    # 3. 裁切 (bbox)
     bbox = sticker_no_bg.getbbox()
     if bbox:
         sticker_cropped = sticker_no_bg.crop(bbox)
         if border > 0: sticker_cropped = add_stroke(sticker_cropped, border)
-        
-        # 4. 縮放與畫布補正 (強制 370x320 偶數)
         sticker_cropped.thumbnail((370, 320), Image.Resampling.LANCZOS)
         final_bg = Image.new("RGBA", (370, 320), (0, 0, 0, 0))
         left = (370 - sticker_cropped.width) // 2
@@ -179,7 +180,7 @@ def create_checkerboard_bg(size, grid_size=20):
                 draw.rectangle([x, y, x+grid_size, y+grid_size], fill=(255, 255, 255))
     return bg
 
-def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val=25, man_r=3, man_c=4, sensitivity=50, protect=30, border=8, edge_crop_px=5):
+def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_val=25, man_r=3, man_c=4, sensitivity=50, protect=30, border=8, edge_crop_px=0, off_x=0, off_y=0):
     img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     processed_stickers = []
     
@@ -187,16 +188,11 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
     grid_rows, grid_cols = man_r, man_c 
     
     if "智慧" in slicing_strategy: use_grid = False
-    elif "手動" in slicing_strategy: use_grid = True
-    elif "自動" in slicing_strategy:
-        use_grid = True
-        h, w, _ = img_cv.shape
-        ratio = w / h
-        if ratio > 1.4: grid_rows, grid_cols = 5, 8
-        else: grid_rows, grid_cols = 5, 6
+    elif "強制" in slicing_strategy: use_grid = True
 
     # 切割邏輯
     if not use_grid:
+        # Smart Vision
         gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
         kernel = np.ones((dilation_val, dilation_val), np.uint8)
@@ -212,14 +208,28 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
             result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
             if result: processed_stickers.append(result)
     else:
+        # Manual Grid with Offset
         height, width, _ = img_cv.shape
         cell_h = height // grid_rows
         cell_w = width // grid_cols
+        
         for r in range(grid_rows):
             for c in range(grid_cols):
-                x = c * cell_w
-                y = r * cell_h
-                sticker_cv = img_cv[y:y+cell_h, x:x+cell_w]
+                # 套用位移校正
+                x = c * cell_w + off_x
+                y = r * cell_h + off_y
+                
+                # 邊界檢查，防止切出去
+                x = max(0, x)
+                y = max(0, y)
+                w_cut = cell_w
+                h_cut = cell_h
+                
+                sticker_cv = img_cv[y:y+h_cut, x:x+w_cut]
+                
+                # 若切出去導致圖片為空，跳過
+                if sticker_cv.size == 0: continue
+                    
                 sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
                 result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
                 if result: processed_stickers.append(result)
@@ -236,6 +246,14 @@ def create_resized_image(img, target_size):
     return bg
 
 # --- 主程式執行區 ---
+
+# 預覽區塊 (放在上傳之後，執行之前)
+if uploaded_files and "強制" in slice_mode:
+    st.info("📏 **網格校正預覽**：請觀察紅線是否切到角色。若切到，請調整側邊欄的 X/Y 位移。")
+    # 只拿第一張圖來做預覽
+    first_img = Image.open(uploaded_files[0]).convert("RGB")
+    preview_img = draw_grid_preview(first_img, manual_rows, manual_cols, offset_x, offset_y)
+    st.image(preview_img, caption="切割線預覽 (紅色)", width=500)
 
 if run_button:
     if not uploaded_files:
@@ -256,10 +274,11 @@ if run_button:
                     stickers, strategy_used = process_single_image(
                         image, remove_mode, slice_mode, dilation_size, 
                         manual_rows, manual_cols,
-                        gs_sensitivity, highlight_protection, border_thickness, edge_crop
+                        gs_sensitivity, highlight_protection, border_thickness, edge_crop,
+                        offset_x, offset_y
                     )
                     
-                    st.write(f"✅ 完成 (模式: {strategy_used[1]}x{strategy_used[0]}, 產出 {len(stickers)} 張)")
+                    st.write(f"✅ 完成 (產出 {len(stickers)} 張)")
                     st.session_state.processed_stickers.extend(stickers)
                     progress_bar.progress((idx + 1) / len(uploaded_files))
                 
@@ -274,9 +293,9 @@ if run_button:
                 status.update(label="❌ 發生錯誤", state="error")
                 st.error(f"程式執行錯誤: {e}")
 
-# --- 預覽與下載區 ---
-
+# --- 下載區 (省略重複代碼，功能同上) ---
 if st.session_state.processed_stickers:
+    # ... (保持原有的下載區塊代碼) ...
     st.divider()
     st.header("🖼️ 貼圖總覽與設定")
     
@@ -337,9 +356,9 @@ if st.session_state.processed_stickers:
         zf.writestr("tab.png", tab_byte.getvalue())
 
     st.download_button(
-        label=f"📦 下載 v7.8 完整懶人包",
+        label=f"📦 下載 v8.0 完整懶人包",
         data=zip_buffer.getvalue(),
-        file_name="SarahDad_v7.8_Stickers.zip",
+        file_name="SarahDad_v8.0_Stickers.zip",
         mime="application/zip",
         type="primary"
     )
