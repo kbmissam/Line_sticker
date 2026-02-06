@@ -7,9 +7,9 @@ import numpy as np
 import cv2
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v9.1", page_icon="🐴", layout="wide")
-st.title("🐴 莎拉爸貼圖神器 v9.1 (預覽修復版)")
-st.markdown("🚀 **v9.1 更新**：將紅線預覽移至主畫面最上方，調整切割線時更直觀。")
+st.set_page_config(page_title="莎拉爸貼圖神器 v10.0", page_icon="🐴", layout="wide")
+st.title("🐴 莎拉爸貼圖神器 v10.0 (智慧綠幕修復版)")
+st.markdown("🚀 **v10.0 更新**：重寫「智慧視覺」演算法，現在能精準識別綠幕背景，解決「整張不切」的問題。")
 
 # --- Session State 初始化 ---
 if 'processed_stickers' not in st.session_state:
@@ -65,44 +65,38 @@ st.sidebar.header("3. 切割策略")
 slice_mode = st.sidebar.radio(
     "選擇切割方式：",
     (
-        "📏 自由多線微調 (推薦 Batch 4)", 
-        "🧠 智慧視覺偵測", 
+        "🧠 智慧視覺偵測 (推薦)", 
+        "📏 自由多線微調", 
         "🤖 強制網格 (平均分配)"
     )
 )
 
 # --- 核心變數與滑桿 ---
-# 預設偏移量
 off_v1, off_v2, off_v3 = 0, 0, 0
 off_h1, off_h2 = 0, 0
-dilation_size = 35
+dilation_size = 25
 
 if "智慧" in slice_mode:
-    dilation_size = st.sidebar.slider("膨脹係數 (防切散)", 5, 100, 35)
-    st.sidebar.info("💡 智慧模式會自動偵測物體邊緣。")
+    st.sidebar.markdown("##### 🧠 智慧偵測設定")
+    dilation_size = st.sidebar.slider("膨脹係數 (黏合力)", 5, 100, 30, 
+                                      help="數值越大，越能把分離的文字和人黏在一起視為同一張圖。")
+    st.sidebar.info("💡 此模式現在會自動偵測「非綠色」區域進行切割。")
     
 elif "自由" in slice_mode:
     st.sidebar.markdown("### 🔪 手術刀切割 (偏移校正)")
-    st.sidebar.info("請看著右側主畫面，調整下方的線條位置。")
     
     with st.sidebar.expander("↕️ 直向切割線 (Vertical)", expanded=True):
-        st.caption("調整垂直線 (左右移動)")
-        off_v1 = st.slider("線 1 (第1-2欄之間)", -100, 100, 0)
-        off_v2 = st.slider("線 2 (第2-3欄之間)", -100, 100, 0)
-        off_v3 = st.slider("線 3 (第3-4欄之間)", -100, 100, 0)
+        off_v1 = st.slider("線 1", -100, 100, 0)
+        off_v2 = st.slider("線 2", -100, 100, 0)
+        off_v3 = st.slider("線 3", -100, 100, 0)
 
     with st.sidebar.expander("↔️ 橫向切割線 (Horizontal)", expanded=True):
-        st.caption("調整水平線 (上下移動)")
-        off_h1 = st.slider("線 A (第1-2列之間)", -100, 100, 0)
-        off_h2 = st.slider("線 B (第2-3列之間)", -100, 100, 0)
-
-else:
-    st.sidebar.warning("⚠️ 標準模式：平均切割 4x3 網格。")
+        off_h1 = st.slider("線 A", -100, 100, 0)
+        off_h2 = st.slider("線 B", -100, 100, 0)
 
 # --- 函數定義區 ---
 
 def get_grid_lines(w, h, ov1, ov2, ov3, oh1, oh2):
-    """計算所有切割線的絕對坐標"""
     base_v1 = w // 4
     base_v2 = w * 2 // 4
     base_v3 = w * 3 // 4
@@ -114,16 +108,11 @@ def get_grid_lines(w, h, ov1, ov2, ov3, oh1, oh2):
     return v_lines, h_lines
 
 def draw_freeline_preview(img_pil, v_lines, h_lines):
-    """繪製紅線預覽圖"""
     img = img_pil.copy()
     draw = ImageDraw.Draw(img)
     w, h = img.size
-    
-    # 畫垂直線
     for x in v_lines[1:-1]:
         draw.line([(x, 0), (x, h)], fill="red", width=5)
-    
-    # 畫水平線
     for y in h_lines[1:-1]:
         draw.line([(0, y), (w, y)], fill="red", width=5)
     return img
@@ -201,25 +190,45 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
     processed_stickers = []
     
     if "智慧" in slicing_strategy:
-        # Smart Vision Logic
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+        # v10.0 更新：針對綠幕優化的智慧偵測
+        if "綠幕" in mode_selection:
+            # 1. 轉 HSV
+            hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
+            # 2. 定義綠色背景範圍 (與去背邏輯稍微不同，這裡要抓「背景」)
+            lower_green = np.array([35, 40, 40])
+            upper_green = np.array([85, 255, 255])
+            bg_mask = cv2.inRange(hsv, lower_green, upper_green)
+            # 3. 反轉遮罩：非綠色 = 前景 (貼圖)
+            thresh = cv2.bitwise_not(bg_mask)
+        else:
+            # 白底模式
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
+
+        # 4. 膨脹 (黏合分離的元件)
         kernel = np.ones((dilation_val, dilation_val), np.uint8)
         thresh = cv2.dilate(thresh, kernel, iterations=2)
+        
+        # 5. 找輪廓
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        min_area = 1000 
+        min_area = 2000 # 稍微調高，過濾雜訊
+        
         valid_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
         bounding_boxes = [cv2.boundingRect(c) for c in valid_contours]
+        
+        # 排序：由上到下，由左到右
         bounding_boxes.sort(key=lambda x: (round(x[1]/100), x[0]))
+        
         for x, y, w, h in bounding_boxes:
             sticker_cv = img_cv[y:y+h, x:x+w]
             sticker_pil = Image.fromarray(cv2.cvtColor(sticker_cv, cv2.COLOR_BGR2RGB))
             result = extract_and_resize(sticker_pil, mode_selection, sensitivity, protect, border, edge_crop_px)
             if result: processed_stickers.append(result)
+            
         return processed_stickers, ("Smart", "Vision")
 
     else:
-        # 自由切割或強制網格
+        # 網格切割
         height, width, _ = img_cv.shape
         v_lines, h_lines = get_grid_lines(width, height, ov1, ov2, ov3, oh1, oh2)
         
@@ -231,7 +240,6 @@ def process_single_image(image_pil, mode_selection, slicing_strategy, dilation_v
                 y_end = h_lines[r+1]
                 
                 if x_end <= x_start or y_end <= y_start: continue
-
                 sticker_cv = img_cv[y_start:y_end, x_start:x_end]
                 if sticker_cv.size == 0: continue
                     
@@ -250,29 +258,21 @@ def create_resized_image(img, target_size):
     bg.paste(img, (left, top))
     return bg
 
-# --- 主程式區：預覽與執行 ---
+# --- 主程式區 ---
 
-# 1. 預覽區塊 (移至最上方)
+# 1. 預覽區 (自由切割模式才顯示)
 if uploaded_files and "自由" in slice_mode:
     st.divider()
     st.header("👀 切割線即時預覽")
     st.info("請調整側邊欄的滑桿，確保**紅色線條**沒有切到角色或對話框。")
-    
-    # 讀取第一張圖做預覽
     first_img = Image.open(uploaded_files[0]).convert("RGB")
     w, h = first_img.size
-    
-    # 計算線條位置
     v_preview, h_preview = get_grid_lines(w, h, off_v1, off_v2, off_v3, off_h1, off_h2)
-    
-    # 繪製紅線
     preview_img = draw_freeline_preview(first_img, v_preview, h_preview)
-    
-    # 顯示
     st.image(preview_img, caption="紅線切割預覽 (即時)", use_container_width=True)
     st.divider()
 
-# 2. 執行區塊
+# 2. 執行區
 if run_button:
     if not uploaded_files:
         st.error("❌ 請先上傳圖片！")
@@ -300,8 +300,8 @@ if run_button:
                     progress_bar.progress((idx + 1) / len(uploaded_files))
                 
                 if not st.session_state.processed_stickers:
-                    status.update(label="⚠️ 沒切出東西，請檢查設定", state="error")
-                    st.error("⚠️ 未偵測到貼圖，請檢查切割策略或去背設定。")
+                    status.update(label="⚠️ 沒切出東西", state="error")
+                    st.error("⚠️ 未偵測到貼圖，請檢查：1.去背模式是否選對 2.膨脹係數是否需要調整")
                 else:
                     status.update(label="✅ 處理完成！", state="complete", expanded=False)
                     st.success(f"🎉 成功！共產出 {len(st.session_state.processed_stickers)} 張貼圖。")
@@ -310,7 +310,7 @@ if run_button:
                 status.update(label="❌ 發生錯誤", state="error")
                 st.error(f"程式執行錯誤: {e}")
 
-# 3. 下載與成果區
+# 3. 成果區
 if st.session_state.processed_stickers:
     st.divider()
     st.header("🖼️ 貼圖總覽與設定")
@@ -372,9 +372,9 @@ if st.session_state.processed_stickers:
         zf.writestr("tab.png", tab_byte.getvalue())
 
     st.download_button(
-        label=f"📦 下載 v9.1 完整懶人包",
+        label=f"📦 下載 v10.0 完整懶人包",
         data=zip_buffer.getvalue(),
-        file_name="SarahDad_v9.1_Stickers.zip",
+        file_name="SarahDad_v10.0_Stickers.zip",
         mime="application/zip",
         type="primary"
     )
