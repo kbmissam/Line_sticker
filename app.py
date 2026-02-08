@@ -8,12 +8,11 @@ import cv2
 import math
 
 # --- 頁面設定 ---
-st.set_page_config(page_title="莎拉爸貼圖神器 v15.0", page_icon="🍌", layout="wide")
-st.title("🍌 莎拉爸貼圖神器 v15.0 (全能完全體)")
+st.set_page_config(page_title="莎拉爸貼圖神器 v15.1", page_icon="🍌", layout="wide")
+st.title("🍌 莎拉爸貼圖神器 v15.1 (緊密裁切修正版)")
 st.markdown("""
-🚀 **v15.0 更新**：
-1. **視覺膠水 (Visual Glue)**：防止文字被切斷。
-2. **二次構圖 (Re-Composition)**：切圖後可 **無損放大** 與 **調整位置**，徹底解決角色太小的問題。
+🚀 **v15.1 重要修正**：
+修正了二次構圖的邏輯。現在會先**自動切除周圍多餘的透明區域**，抓緊角色與白邊，然後再進行放大與置中，確保角色真正撐滿貼圖空間。
 """)
 
 # --- Session State ---
@@ -64,18 +63,18 @@ grid_padding = 50
 dilation_strength = 25 
 
 if "智能網格" in slice_mode or "純智慧視覺" in slice_mode:
-    grid_padding = st.sidebar.slider("↔️ 裁切寬容度 (Padding)", 10, 150, 50, help="切完後要留多少邊距。")
+    grid_padding = st.sidebar.slider("↔️ 裁切寬容度 (Padding)", 10, 150, 50, help="建議調小 (如 10-20)，配合下方自動緊密裁切效果更好。")
     
     # --- v14：視覺膠水控制 ---
     st.sidebar.markdown("##### 🧪 視覺膠水 (Visual Glue)")
-    dilation_strength = st.sidebar.slider("🎈 膨脹係數 (Dilation)", 5, 100, 40, help="數值越大，膠水越強，能把離很遠的文字跟身體黏在一起切下來。")
+    dilation_strength = st.sidebar.slider("🎈 膨脹係數 (Dilation)", 5, 100, 40, help="防止文字被切斷的膠水強度。")
 
-# --- v15：二次構圖控制 ---
+# --- v15.1：二次構圖控制 (修正版) ---
 st.sidebar.markdown("---")
-st.sidebar.header("4. 二次構圖 (v15 核心)")
-st.sidebar.markdown("解決「角色太小」的問題，切圖後自動放大裁切。")
-zoom_factor = st.sidebar.slider("🔎 放大倍率 (Zoom)", 1.0, 2.5, 1.0, 0.1, help="1.0=原圖。1.5=放大50%。拉大此數值可讓角色特寫更明顯。")
-offset_y = st.sidebar.slider("↕️ 垂直位移 (Offset Y)", -100, 100, 0, step=5, help="正數向下移，負數向上移。如果放大後頭頂被切到，請往下拉(正數)。")
+st.sidebar.header("4. 二次構圖 (v15.1 修正)")
+st.sidebar.markdown("現在會自動切除多餘透明邊框！")
+zoom_factor = st.sidebar.slider("🔎 額外放大倍率 (Zoom)", 1.0, 2.0, 1.0, 0.1, help="在緊密裁切的基礎上，再額外放大角色。")
+offset_y = st.sidebar.slider("↕️ 垂直位移 (Offset Y)", -100, 100, 0, step=5, help="正數向下移，負數向上移。調整角色在最終畫布中的位置。")
 
 
 # --- 核心演算法區 ---
@@ -121,155 +120,117 @@ def get_pro_matte(chunk_cv, sensitivity, protect, erode_iter, softness):
 def extract_content_smart_v14(chunk_cv, sensitivity, protect, d_strength, erode, soft, dilation_val):
     """v14 視覺膠水演算法"""
     h, w, _ = chunk_cv.shape
-    
-    # 1. 取得基礎遮罩
     base_mask = get_pro_matte(chunk_cv, sensitivity, protect, 0, 0)
-    
-    # --- v14 關鍵步驟：視覺膨脹 (The Glue) ---
     glue_kernel_size = dilation_val
     glue_kernel = np.ones((glue_kernel_size, glue_kernel_size), np.uint8)
-    
-    # 製作「偵測用遮罩」
     detection_mask = cv2.dilate(base_mask, glue_kernel, iterations=1)
-    
-    # 2. 在「膨脹遮罩」上找輪廓
     contours, _ = cv2.findContours(detection_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
     if not contours: return None
-    
-    # 過濾太小的雜訊
     min_area = 1000 
     valid_contours = [c for c in contours if cv2.contourArea(c) > min_area]
-    
     if not valid_contours: return None
-    
-    # 3. 找出「最大的那一坨」
     best_cnt = max(valid_contours, key=cv2.contourArea)
-    
-    # 4. 取得這一坨的座標 (Bounding Box)
     x, y, cw, ch = cv2.boundingRect(best_cnt)
-    
-    # 5. 製作最終的高畫質遮罩
     high_quality_mask = get_pro_matte(chunk_cv, sensitivity, protect, erode, soft)
-    
-    # 6. 應用 Despill
     if d_strength > 0:
         chunk_clean = apply_despill(chunk_cv, d_strength)
     else:
         chunk_clean = chunk_cv
-        
-    # 7. 合併 RGBA
     b, g, r = cv2.split(chunk_clean)
     rgba = cv2.merge([r, g, b, high_quality_mask])
-    
-    # 8. 裁切
     pad = soft + 2
     x_cut = max(0, x - pad)
     y_cut = max(0, y - pad)
     w_cut = min(w - x_cut, cw + x - x_cut + pad)
     h_cut = min(h - y_cut, ch + y - y_cut + pad)
-    
     final_chunk = rgba[y_cut:y_cut+h_cut, x_cut:x_cut+w_cut]
-    
     if final_chunk.size == 0: return None
-    
     return Image.fromarray(final_chunk)
 
 def add_stroke_and_resize(sticker_pil, border, zoom=1.0, offset_y=0):
     """
-    v15.0 升級：加入 Zoom (放大) 與 Offset (位移) 功能
+    v15.1 核心修正：自動緊密裁切 + 放大置中
+    解決角色太小以及透明邊框過多的問題。
     """
-    # 1. 先加白邊
+    # 1. 先加白邊 (維持原邏輯)
+    img_rgba = sticker_pil.convert("RGBA")
     if border > 0:
-        img = sticker_pil.convert("RGBA")
-        r, g, b, a = img.split()
+        r, g, b, a = img_rgba.split()
         alpha_np = np.array(a)
-        
         kernel = np.ones((border * 2 + 1, border * 2 + 1), np.uint8)
         outline_alpha = cv2.dilate(alpha_np, kernel, iterations=1)
-        
-        stroke_bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        stroke_bg = Image.new("RGBA", img_rgba.size, (255, 255, 255, 255))
         stroke_bg.putalpha(Image.fromarray(outline_alpha))
-        sticker_pil = Image.alpha_composite(stroke_bg, img)
+        img_rgba = Image.alpha_composite(stroke_bg, img_rgba)
+        
+    # --- v15.1 關鍵修正開始 ---
+    
+    # 2. 【關鍵】找出內容的「緊密邊界框 (Tight BBox)」
+    # getbbox() 會回傳非透明區域的最小矩形座標 (left, top, right, bottom)
+    bbox = img_rgba.getbbox()
+    
+    if not bbox:
+        # 防呆：如果是全透明圖，回傳空畫布
+        return Image.new("RGBA", (370, 320), (0,0,0,0))
 
-    # 2. 二次構圖：放大裁切 (v15 New!)
-    if zoom > 1.0 or offset_y != 0:
-        # 取得目前尺寸
-        w, h = sticker_pil.size
+    # 3. 緊密裁切 (Crop Tight)
+    # 這一步把周圍多餘的透明全部切掉
+    tight_img = img_rgba.crop(bbox)
+    
+    # 4. 應用額外放大倍率 (Apply Zoom to the tight crop)
+    if zoom > 1.0:
+        tight_w, tight_h = tight_img.size
+        new_tight_w = int(tight_w * zoom)
+        new_tight_h = int(tight_h * zoom)
+        # 使用高品質縮放
+        tight_img = tight_img.resize((new_tight_w, new_tight_h), Image.Resampling.LANCZOS)
         
-        # 計算放大後的尺寸
-        new_w = int(w * zoom)
-        new_h = int(h * zoom)
-        
-        # 進行高品質放大
-        img_zoomed = sticker_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        
-        # 計算裁切範圍 (以中心為基準)
-        # 目標是切回原始 w, h 的大小，但是中心點可以偏移
-        left = (new_w - w) // 2
-        top = (new_h - h) // 2
-        
-        # 應用垂直位移
-        top = top - offset_y
-        
-        # 確保裁切框不超出範圍 (防呆)
-        left = max(0, left)
-        top = max(0, top)
-        # 如果因為偏移導致下方超出範圍，也不要報錯，PIL crop 會自動處理邊界，
-        # 但為了保險，我們設定 crop box
-        right = left + w
-        bottom = top + h
-        
-        sticker_pil = img_zoomed.crop((left, top, right, bottom))
-
-    # 3. 縮放與置中 (LINE 貼圖標準 370x320)
-    sticker_pil.thumbnail((370, 320), Image.Resampling.LANCZOS)
+    # --- 最終構圖 ---
+    
+    # 5. 準備要貼上的最終影像 (保持比例縮放到能塞進 370x320)
+    final_sticker_content = tight_img.copy()
+    final_sticker_content.thumbnail((370, 320), Image.Resampling.LANCZOS)
+    
+    # 6. 建立最終透明畫布並置中貼上
     final_bg = Image.new("RGBA", (370, 320), (0, 0, 0, 0))
-    left = (370 - sticker_pil.width) // 2
-    top = (320 - sticker_pil.height) // 2
-    final_bg.paste(sticker_pil, (left, top))
+    fw, fh = final_sticker_content.size
+    
+    # 計算置中位置
+    left = (370 - fw) // 2
+    top = (320 - fh) // 2
+    
+    # 應用垂直位移 (Offset Y) - 移動最終貼圖在畫布上的位置
+    top = top + offset_y
+    
+    # 貼上
+    final_bg.paste(final_sticker_content, (left, top))
+    
     return final_bg
 
 def process_image(image_pil, slice_strategy, padding, sens, prot, border, d_str, ero, soft, dilation_val, zoom, off_y):
     img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
-    
-    # Pre-crop
     h_full, w_full, _ = img_cv.shape
     img_cv = img_cv[10:h_full-10, 10:w_full-10]
-    
     results = []
-    
-    # --- 策略 A: 智能網格 (4x3) ---
     if "智能網格" in slice_strategy:
         h, w, _ = img_cv.shape
         v_lines = [int(w * i / 4) for i in range(5)]
         h_lines = [int(h * i / 3) for i in range(4)]
-        
         for r in range(3):
             for c in range(4):
                 x1, x2 = v_lines[c], v_lines[c+1]
                 y1, y2 = h_lines[r], h_lines[r+1]
-                
                 x1_p = max(0, x1 - padding)
                 x2_p = min(w, x2 + padding)
                 y1_p = max(0, y1 - padding)
                 y2_p = min(h, y2 + padding)
-                
                 chunk = img_cv[y1_p:y2_p, x1_p:x2_p]
-                
-                # 呼叫 v14 膠水函數
                 sticker = extract_content_smart_v14(chunk, sens, prot, d_str, ero, soft, dilation_val)
-                
                 if sticker:
-                    # 呼叫 v15 二次構圖函數 (傳入 zoom 與 offset)
                     final = add_stroke_and_resize(sticker, border, zoom, off_y)
                     results.append(final)
-    
-    # --- 策略 B: 純智慧視覺 (保留給不規則排列) ---
     elif "純智慧視覺" in slice_strategy:
-         # 暫不支援網格外的邏輯
          pass 
-
     return results
 
 def create_resized_image(img, target_size):
@@ -295,11 +256,11 @@ if run_button:
     if not uploaded_files:
         st.error("❌ 請先上傳圖片！")
     else:
-        st.toast("🚀 啟動 v15 全能引擎...", icon="✨")
+        st.toast("🚀 啟動 v15.1 修正引擎...", icon="✨")
         st.session_state.processed_stickers = []
         st.session_state.original_images = []
         
-        with st.status("正在進行 AI 切割、文字黏合與二次構圖...", expanded=True) as status:
+        with st.status("正在進行 AI 切割、緊密裁切與二次構圖...", expanded=True) as status:
             prog = st.progress(0)
             for i, f in enumerate(uploaded_files):
                 img = Image.open(f).convert("RGB")
@@ -309,14 +270,14 @@ if run_button:
                     img, slice_mode, grid_padding, 
                     gs_sensitivity, highlight_protection, border_thickness,
                     despill_level, mask_erode, edge_softness, dilation_strength,
-                    zoom_factor, offset_y # v15 新參數
+                    zoom_factor, offset_y
                 )
                 st.session_state.processed_stickers.extend(res)
                 prog.progress((i+1)/len(uploaded_files))
             
             if st.session_state.processed_stickers:
                 status.update(label="✅ 處理完成", state="complete", expanded=False)
-                st.success(f"🎉 成功產出 {len(st.session_state.processed_stickers)} 張貼圖！(已套用放大與位移)")
+                st.success(f"🎉 成功產出 {len(st.session_state.processed_stickers)} 張貼圖！(已自動去除多餘透明邊框)")
             else:
                 status.update(label="⚠️ 失敗", state="error")
                 st.error("未偵測到貼圖，請嘗試調大「綠色閥值」或「膨脹係數」。")
@@ -368,4 +329,4 @@ if st.session_state.processed_stickers:
             m_img.save(bm, "PNG"); zf.writestr("main.png", bm.getvalue())
             t_img.save(bt, "PNG"); zf.writestr("tab.png", bt.getvalue())
             
-    st.download_button("📦 下載 v15.0 懶人包", buf.getvalue(), "SarahDad_v15.0.zip", "application/zip", type="primary")
+    st.download_button("📦 下載 v15.1 懶人包", buf.getvalue(), "SarahDad_v15.1.zip", "application/zip", type="primary")
